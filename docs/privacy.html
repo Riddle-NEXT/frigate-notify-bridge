@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — Frigate Notify Bridge</title>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; max-width: 700px; margin: 0 auto; padding: 2rem 1rem; color: #222; line-height: 1.6; }
+    h1 { border-bottom: 2px solid #eee; padding-bottom: .5rem; }
+    h2 { margin-top: 2rem; }
+    a { color: #0366d6; }
+    .updated { color: #666; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: March 1, 2026</p>
+
+  <h2>Overview</h2>
+  <p>Frigate Notify Bridge is an open-source <a href="https://www.home-assistant.io/">Home Assistant</a> integration that delivers push notifications from a self-hosted <a href="https://frigate.video/">Frigate NVR</a> instance to the Frigate Mobile app. It runs entirely on your own hardware.</p>
+
+  <h2>Data Collection</h2>
+  <p><strong>We do not collect, store, or transmit any personal data.</strong></p>
+  <p>The integration runs locally on your Home Assistant instance. No data is sent to us or any third party operated by us.</p>
+
+  <h2>Google Account Access</h2>
+  <p>During the optional Easy Setup flow, the integration requests temporary access to your Google account to:</p>
+  <ul>
+    <li>List your Firebase projects</li>
+    <li>Enable the Firebase Cloud Messaging API on your selected project</li>
+    <li>Create a service account key for sending push notifications</li>
+  </ul>
+  <p>This access is used <strong>only during initial setup</strong>. The OAuth access token is revoked immediately after setup completes. The generated service account key is stored locally on your Home Assistant instance and is never transmitted to us.</p>
+
+  <h2>Push Notifications</h2>
+  <p>Notifications are sent directly from your Home Assistant instance to Google's Firebase Cloud Messaging service (or ntfy/Pushover, depending on your configuration). We do not operate any relay servers and have no access to your notification content.</p>
+
+  <h2>Third-Party Services</h2>
+  <p>Depending on your chosen push provider, notifications pass through:</p>
+  <ul>
+    <li><strong>Firebase Cloud Messaging</strong> — operated by Google (<a href="https://policies.google.com/privacy">Google Privacy Policy</a>)</li>
+    <li><strong>ntfy</strong> — self-hosted or via ntfy.sh (<a href="https://ntfy.sh/docs/privacy/">ntfy Privacy Policy</a>)</li>
+    <li><strong>Pushover</strong> — operated by Superblock (<a href="https://pushover.net/privacy">Pushover Privacy Policy</a>)</li>
+  </ul>
+
+  <h2>Open Source</h2>
+  <p>This integration is fully open source. You can review the complete source code at <a href="https://github.com/LowkeyNEXT/frigate-notify-bridge">github.com/LowkeyNEXT/frigate-notify-bridge</a>.</p>
+
+  <h2>Contact</h2>
+  <p>If you have questions about this privacy policy, please <a href="https://github.com/LowkeyNEXT/frigate-notify-bridge/issues">open an issue</a> on GitHub.</p>
+</body>
+</html>

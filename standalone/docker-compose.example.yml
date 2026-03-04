@@ -1,0 +1,59 @@
+# Example Docker Compose for Frigate Notify Bridge (Standalone)
+# Use this if you don't have Home Assistant
+
+version: "3.8"
+
+services:
+  frigate-notify-bridge:
+    image: ghcr.io/LowkeyNEXT/frigate-notify-bridge:latest
+    container_name: frigate-notify-bridge
+    restart: unless-stopped
+    ports:
+      - "8199:8199"
+    environment:
+      # Required: Frigate connection
+      FRIGATE_URL: "http://frigate:5000"
+      # FRIGATE_USERNAME: ""  # Optional: if Frigate auth is enabled
+      # FRIGATE_PASSWORD: ""
+
+      # Required: MQTT connection (where Frigate publishes events)
+      MQTT_HOST: "mqtt"
+      MQTT_PORT: "1883"
+      # MQTT_USERNAME: ""  # Optional
+      # MQTT_PASSWORD: ""
+      MQTT_TOPIC_PREFIX: "frigate"
+
+      # Push notification provider (choose one: fcm, ntfy, pushover)
+      PUSH_PROVIDER: "fcm"
+
+      # For FCM: Mount your Firebase credentials file
+      FCM_CREDENTIALS_FILE: "/config/firebase-credentials.json"
+
+      # For ntfy (alternative to FCM):
+      # PUSH_PROVIDER: "ntfy"
+      # NTFY_URL: "https://ntfy.sh"
+      # NTFY_TOPIC: "my-frigate-alerts"
+      # NTFY_TOKEN: ""  # Optional: for authenticated topics
+
+      # For Pushover (alternative to FCM):
+      # PUSH_PROVIDER: "pushover"
+      # PUSHOVER_USER_KEY: "your_user_key"
+      # PUSHOVER_API_TOKEN: "your_api_token"
+
+      # Optional: External URL for remote access pairing
+      # EXTERNAL_URL: "https://your-domain.com:8199"
+
+      # Logging
+      LOG_LEVEL: "INFO"
+
+    volumes:
+      # Mount config directory for Firebase credentials and device storage
+      - ./config:/config
+
+    # If Frigate and MQTT are on the same Docker network
+    networks:
+      - frigate_network
+
+networks:
+  frigate_network:
+    external: true  # Use existing network from Frigate's compose

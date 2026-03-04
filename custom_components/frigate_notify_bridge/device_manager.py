@@ -1,0 +1,386 @@
+"""Device manager for Frigate Notify Bridge."""
+from __future__ import annotations
+
+import logging
+import secrets
+from datetime import datetime, timedelta
+from typing import Any
+
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+from .const import (
+    DOMAIN,
+    PAIRING_TOKEN_EXPIRY_SECONDS,
+    PAIRING_CODE_LENGTH,
+    SIGNAL_DEVICE_REGISTERED,
+    SIGNAL_DEVICE_REMOVED,
+    EVENT_DEVICE_PAIRED,
+    EVENT_DEVICE_REMOVED,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class DeviceManager:
+    """Manage paired mobile devices."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        store,
+        initial_devices: dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize the device manager."""
+        self.hass = hass
+        self._store = store
+        self._devices: dict[str, dict[str, Any]] = initial_devices or {}
+        self._pending_pairings: dict[str, dict[str, Any]] = {}
+
+    async def async_save(self) -> None:
+        """Save devices to storage."""
+        await self._store.async_save(
+            {
+                "devices": self._devices,
+                "settings": {},
+            }
+        )
+
+    async def async_get_devices(self) -> dict[str, dict[str, Any]]:
+        """Get all paired devices."""
+        return self._devices.copy()
+
+    async def async_get_device(self, device_id: str) -> dict[str, Any] | None:
+        """Get a specific device."""
+        return self._devices.get(device_id)
+
+    def generate_pairing_code(self) -> dict[str, Any]:
+        """Generate a new pairing code and token.
+
+        Returns a dict with:
+        - code: Human-readable 6-character code for display
+        - token: Full token for QR code
+        - expires_at: Expiration timestamp
+        """
+        # Generate a readable pairing code (6 alphanumeric chars)
+        code = "".join(
+            secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+            for _ in range(PAIRING_CODE_LENGTH)
+        )
+
+        # Generate a secure token
+        token = secrets.token_urlsafe(32)
+
+        expires_at = datetime.utcnow() + timedelta(seconds=PAIRING_TOKEN_EXPIRY_SECONDS)
+
+        pairing_data = {
+            "code": code,
+            "token": token,
+            "expires_at": expires_at.isoformat(),
+            "created_at": datetime.utcnow().isoformat(),
+        }
+
+        # Store by both code and token for flexible lookup
+        self._pending_pairings[code] = pairing_data
+        self._pending_pairings[token] = pairing_data
+
+        _LOGGER.debug("Generated pairing code: %s (expires: %s)", code, expires_at)
+
+        return {
+            "code": code,
+            "token": token,
+            "expires_at": expires_at.isoformat(),
+            "expires_in": PAIRING_TOKEN_EXPIRY_SECONDS,
+        }
+
+    def validate_pairing_token(self, token_or_code: str) -> dict[str, Any] | None:
+        """Validate a pairing token or code.
+
+        Returns the pairing data if valid, None if invalid or expired.
+        """
+        pairing_data = self._pending_pairings.get(token_or_code)
+        if pairing_data is None:
+            return None
+
+        # Check expiration
+        expires_at = datetime.fromisoformat(pairing_data["expires_at"])
+        if datetime.utcnow() > expires_at:
+            # Clean up expired pairing
+            self._cleanup_pairing(pairing_data)
+            return None
+
+        return pairing_data
+
+    def _cleanup_pairing(self, pairing_data: dict[str, Any]) -> None:
+        """Remove a pairing from pending."""
+        code = pairing_data.get("code")
+        token = pairing_data.get("token")
+        if code:
+            self._pending_pairings.pop(code, None)
+        if token:
+            self._pending_pairings.pop(token, None)
+
+    async def async_complete_pairing(
+        self,
+        token_or_code: str,
+        device_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Complete device pairing.
+
+        Args:
+            token_or_code: The pairing token or code
+            device_info: Device information from the mobile app:
+                - name: Device name
+                - platform: ios/android
+                - fcm_token: FCM registration token (for FCM provider)
+                - app_version: App version string
+
+        Returns:
+            Device registration data including device_id and API token
+
+        Raises:
+            ValueError: If token is invalid or expired
+        """
+        pairing_data = self.validate_pairing_token(token_or_code)
+        if pairing_data is None:
+            raise ValueError("Invalid or expired pairing token")
+
+        # Generate device ID and API token
+        device_id = secrets.token_urlsafe(16)
+        api_token = secrets.token_urlsafe(32)
+
+        # Create device record
+        device = {
+            "id": device_id,
+            "name": device_info.get("name", "Unknown Device"),
+            "platform": device_info.get("platform", "unknown"),
+            "fcm_token": device_info.get("fcm_token"),
+            "app_version": device_info.get("app_version"),
+            "api_token": api_token,
+            "paired_at": datetime.utcnow().isoformat(),
+            "last_seen": datetime.utcnow().isoformat(),
+            "notification_settings": {
+                "enabled": True,
+                "cameras": [],  # Empty = all cameras
+                "labels": ["person"],
+                "zones": [],
+                "cooldown_seconds": 60,
+                "quiet_hours_start": None,
+                "quiet_hours_end": None,
+            },
+        }
+
+        self._devices[device_id] = device
+        await self.async_save()
+
+        # Clean up pairing data
+        self._cleanup_pairing(pairing_data)
+
+        # Notify listeners
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_REGISTERED, device_id)
+
+        # Fire HA event for automations
+        self.hass.bus.async_fire(EVENT_DEVICE_PAIRED, {
+            "device_id": device_id,
+            "device_name": device["name"],
+            "platform": device["platform"],
+        })
+
+        # Create persistent notification
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "title": "Frigate Mobile Device Paired",
+                "message": (
+                    f"**{device['name']}** ({device['platform']}) "
+                    f"has been paired successfully."
+                ),
+                "notification_id": f"{DOMAIN}_paired_{device_id}",
+            },
+        )
+
+        _LOGGER.info("Device paired: %s (%s)", device["name"], device_id)
+
+        return {
+            "device_id": device_id,
+            "api_token": api_token,
+        }
+
+    async def async_remove_device(self, device_id: str) -> bool:
+        """Remove a paired device."""
+        if device_id not in self._devices:
+            return False
+
+        device = self._devices.pop(device_id)
+        await self.async_save()
+
+        # Notify listeners
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_REMOVED, device_id)
+
+        # Fire HA event for automations
+        self.hass.bus.async_fire(EVENT_DEVICE_REMOVED, {
+            "device_id": device_id,
+            "device_name": device.get("name", "Unknown"),
+        })
+
+        _LOGGER.info("Device removed: %s (%s)", device.get("name"), device_id)
+        return True
+
+    async def async_update_device(
+        self,
+        device_id: str,
+        updates: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Update device information."""
+        if device_id not in self._devices:
+            return None
+
+        device = self._devices[device_id]
+
+        # Update allowed fields
+        allowed_updates = ["name", "fcm_token", "app_version", "notification_settings", "relay_device_id"]
+        for key in allowed_updates:
+            if key in updates:
+                if key == "notification_settings":
+                    # Merge notification settings
+                    device["notification_settings"].update(updates[key])
+                else:
+                    device[key] = updates[key]
+
+        device["last_seen"] = datetime.utcnow().isoformat()
+
+        await self.async_save()
+        return device
+
+    async def async_update_fcm_token(
+        self,
+        device_id: str,
+        fcm_token: str,
+    ) -> bool:
+        """Update a device's FCM token."""
+        if device_id not in self._devices:
+            return False
+
+        self._devices[device_id]["fcm_token"] = fcm_token
+        self._devices[device_id]["last_seen"] = datetime.utcnow().isoformat()
+        await self.async_save()
+        return True
+
+    def validate_api_token(self, api_token: str) -> str | None:
+        """Validate an API token and return the device ID if valid."""
+        for device_id, device in self._devices.items():
+            if device.get("api_token") == api_token:
+                return device_id
+        return None
+
+    async def async_get_devices_for_notification(
+        self,
+        camera: str | None = None,
+        label: str | None = None,
+        zone: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Get devices that should receive a notification based on filters."""
+        devices_to_notify = []
+
+        for device in self._devices.values():
+            settings = device.get("notification_settings", {})
+
+            # Check if notifications are enabled
+            if not settings.get("enabled", True):
+                continue
+
+            # Check camera filter
+            allowed_cameras = settings.get("cameras", [])
+            if allowed_cameras and camera and camera not in allowed_cameras:
+                continue
+
+            # Check label filter
+            allowed_labels = settings.get("labels", [])
+            if allowed_labels and label and label not in allowed_labels:
+                continue
+
+            # Check zone filter
+            allowed_zones = settings.get("zones", [])
+            if allowed_zones and zone and zone not in allowed_zones:
+                continue
+
+            # Check quiet hours
+            quiet_start = settings.get("quiet_hours_start")
+            quiet_end = settings.get("quiet_hours_end")
+            if quiet_start is not None and quiet_end is not None:
+                current_hour = datetime.now().hour
+                if quiet_start <= quiet_end:
+                    # Normal range (e.g., 22-7 doesn't wrap)
+                    if quiet_start <= current_hour < quiet_end:
+                        continue
+                else:
+                    # Wrapped range (e.g., 22-7 wraps midnight)
+                    if current_hour >= quiet_start or current_hour < quiet_end:
+                        continue
+
+            devices_to_notify.append(device)
+
+        return devices_to_notify
+
+    async def async_set_frigate_credentials(
+        self,
+        device_id: str,
+        username: str,
+        password: str,
+    ) -> bool:
+        """Store per-device Frigate credentials for proxy authentication."""
+        if device_id not in self._devices:
+            return False
+
+        self._devices[device_id]["frigate_username"] = username
+        self._devices[device_id]["frigate_password"] = password
+        await self.async_save()
+
+        _LOGGER.debug("Updated Frigate credentials for device %s", device_id)
+        return True
+
+    def get_frigate_credentials(
+        self,
+        device_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Get Frigate credentials for a device.
+
+        Returns per-device credentials if set, otherwise returns (None, None).
+        The caller should fall back to integration-level credentials.
+        """
+        device = self._devices.get(device_id)
+        if not device:
+            return None, None
+
+        username = device.get("frigate_username")
+        password = device.get("frigate_password")
+        if username and password:
+            return username, password
+
+        return None, None
+
+    def cleanup_expired_pairings(self) -> int:
+        """Clean up expired pairing tokens. Returns count of removed."""
+        now = datetime.utcnow()
+        expired_codes = []
+
+        for key, data in self._pending_pairings.items():
+            expires_at = datetime.fromisoformat(data["expires_at"])
+            if now > expires_at:
+                expired_codes.append(data.get("code"))
+
+        # Remove expired (using codes to avoid removing twice)
+        removed = 0
+        for code in set(expired_codes):
+            if code and code in self._pending_pairings:
+                data = self._pending_pairings.pop(code)
+                token = data.get("token")
+                if token:
+                    self._pending_pairings.pop(token, None)
+                removed += 1
+
+        if removed:
+            _LOGGER.debug("Cleaned up %d expired pairing tokens", removed)
+
+        return removed
