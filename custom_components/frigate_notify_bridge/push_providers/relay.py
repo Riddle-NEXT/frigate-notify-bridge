@@ -52,6 +52,25 @@ class RelayPushProvider(PushProvider):
             _LOGGER.error("Push relay unreachable: %s", e)
         return False
 
+    async def async_register_device(
+        self,
+        fcm_token: str,
+        platform: str = "unknown",
+        device_id: str | None = None,
+    ) -> str | None:
+        """Register device with relay.
+
+        Note: Device registration requires Firebase Auth + App Check which must
+        be performed by the mobile app, not the bridge. The app calls
+        /registerToken directly after getting its FCM token. This method is a
+        no-op stub kept for interface compatibility.
+        """
+        _LOGGER.debug(
+            "async_register_device called on RelayPushProvider — "
+            "relay registration is handled by the app directly"
+        )
+        return device_id
+
     def _encrypt_payload(self, payload: NotificationPayload) -> str:
         """Encrypt notification payload with AES-256-GCM.
 
