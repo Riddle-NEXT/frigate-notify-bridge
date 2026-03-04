@@ -1,0 +1,196 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Frigate Notify Bridge Setup",
+        "description": "This integration bridges Frigate events to push notifications for the Frigate Mobile app.\n\nDetected integrations:\n- Frigate: {has_frigate}\n- MQTT: {has_mqtt}",
+        "menu_options": {
+          "frigate_setup": "Configure Frigate Connection",
+          "push_provider": "Configure Push Notifications (Advanced)"
+        }
+      },
+      "frigate_setup": {
+        "title": "Frigate Connection",
+        "description": "Configure your Frigate NVR connection.\n\nExisting Frigate URL: {frigate_url}",
+        "data": {
+          "use_frigate_integration": "Use existing Frigate integration",
+          "frigate_url": "Frigate URL (e.g., http://192.168.1.100:5000)",
+          "frigate_username": "Username (if authentication is enabled)",
+          "frigate_password": "Password",
+          "use_ha_mqtt": "Use Home Assistant MQTT broker"
+        }
+      },
+      "mqtt": {
+        "title": "MQTT Configuration",
+        "description": "Configure the MQTT broker connection for Frigate events.",
+        "data": {
+          "mqtt_host": "MQTT Host",
+          "mqtt_port": "MQTT Port",
+          "mqtt_username": "MQTT Username (optional)",
+          "mqtt_password": "MQTT Password (optional)",
+          "mqtt_topic_prefix": "Frigate Topic Prefix"
+        }
+      },
+      "push_provider": {
+        "title": "Push Notification Provider",
+        "description": "Choose how to deliver push notifications to mobile devices.",
+        "data": {
+          "push_provider": "Provider"
+        }
+      },
+      "fcm": {
+        "title": "Firebase Cloud Messaging Setup",
+        "description": "Choose how to configure Firebase Cloud Messaging.",
+        "data": {
+          "fcm_setup_method": "Setup Method"
+        }
+      },
+      "fcm_manual": {
+        "title": "Firebase Cloud Messaging — Manual Setup",
+        "description": "{fcm_instructions}",
+        "data": {
+          "fcm_credentials": "Service Account JSON"
+        }
+      },
+      "fcm_google_sign_in": {
+        "title": "Sign in with Google",
+        "description": "**Step 1:** Open this link in a new tab to sign in:\n\n{oauth_url}\n\n**Step 2:** After signing in and being redirected back, click **Submit** below."
+      },
+      "fcm_wait_for_oauth": {
+        "title": "Waiting for Sign-In",
+        "description": "Complete the Google sign-in in the other tab..."
+      },
+      "fcm_exchange_token": {
+        "title": "Configuring Firebase",
+        "description": "Setting up your Firebase project..."
+      },
+      "fcm_pick_project": {
+        "title": "Choose Firebase Project",
+        "description": "Select an existing Firebase project to reuse, or create a new one.",
+        "data": {
+          "firebase_project": "Firebase Project"
+        }
+      },
+      "fcm_configure_project": {
+        "title": "Setting Up Firebase",
+        "description": "Creating your Firebase project and configuring push notifications. This may take up to a minute..."
+      },
+      "fcm_configure_failed": {
+        "title": "Firebase Setup Failed",
+        "description": "Setup failed: {error_detail}\n\nYou can retry or switch to manual setup.",
+        "data": {
+          "action": "What would you like to do?"
+        }
+      },
+      "ntfy": {
+        "title": "ntfy Setup",
+        "description": "Configure ntfy for push notifications. You can use the public ntfy.sh server or your own self-hosted instance.",
+        "data": {
+          "ntfy_url": "ntfy Server URL",
+          "ntfy_topic": "Topic Name",
+          "ntfy_token": "Access Token (optional)"
+        }
+      },
+      "pushover": {
+        "title": "Pushover Setup",
+        "description": "Enter your Pushover credentials. You can find these in your Pushover dashboard.",
+        "data": {
+          "pushover_user_key": "User Key",
+          "pushover_api_token": "API Token"
+        }
+      },
+      "relay": {
+        "title": "Push Relay Setup",
+        "description": "The push relay securely forwards notifications from your bridge to the Frigate Mobile app. A unique bridge ID, secret, and end-to-end encryption key have been generated for you — you do not need to change these unless you know what you are doing.",
+        "data": {
+          "relay_url": "Relay URL",
+          "relay_bridge_id": "Bridge ID",
+          "relay_bridge_secret": "Bridge Secret",
+          "relay_e2e_key": "End-to-End Encryption Key"
+        }
+      }
+    },
+    "progress": {
+      "wait_for_oauth": "Waiting for Google sign-in to complete...",
+      "configuring_firebase": "Creating Firebase project and configuring push notifications..."
+    },
+    "error": {
+      "url_required": "Please enter a Frigate URL",
+      "cannot_connect": "Could not connect to Frigate server",
+      "auth_required": "This server requires authentication",
+      "invalid_auth": "Invalid username or password",
+      "host_required": "MQTT host is required",
+      "credentials_required": "Firebase credentials are required",
+      "invalid_credentials": "Invalid Firebase credentials (missing required fields)",
+      "invalid_json": "Invalid JSON format",
+      "topic_required": "ntfy topic is required",
+      "user_key_required": "Pushover user key is required",
+      "api_token_required": "Pushover API token is required",
+      "auth_code_required": "Authorization code is missing. Please try again.",
+      "invalid_auth_code": "Invalid or expired authorization code. Please try again.",
+      "fcm_create_project_permission_denied": "Your Google account does not have permission to create projects. Check your GCP organization policies.",
+      "fcm_add_firebase_permission_denied": "Your Google account does not have permission to add Firebase to this project.",
+      "fcm_enable_api_permission_denied": "Your Google account does not have permission to enable APIs on this project.",
+      "fcm_create_sa_permission_denied": "Your Google account does not have permission to create service accounts.",
+      "fcm_create_key_permission_denied": "Your Google account does not have permission to create service account keys.",
+      "fcm_quota_exceeded": "Google Cloud rate limit reached. Please wait a few minutes and retry.",
+      "fcm_server_error": "Google Cloud returned a server error. Please retry in a few minutes.",
+      "fcm_operation_timeout": "The operation timed out waiting for Google Cloud. Please retry.",
+      "fcm_network_error": "Could not reach Google Cloud. Check your network connection and retry.",
+      "fcm_create_project_failed": "Failed to create GCP project. Check logs for details.",
+      "fcm_add_firebase_failed": "Failed to add Firebase to the project. Check logs for details.",
+      "fcm_enable_api_failed": "Failed to enable required APIs. Check logs for details.",
+      "fcm_create_sa_failed": "Failed to create the service account. Check logs for details.",
+      "fcm_create_key_failed": "Failed to create the service account key. Check logs for details.",
+      "fcm_configure_unknown": "An unexpected error occurred during Firebase setup."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one instance of Frigate Notify Bridge is allowed",
+      "oauth_failed": "Google sign-in failed. Please try again or use manual setup.",
+      "oauth_denied": "Access was denied. Please try again and grant the requested permissions.",
+      "oauth_token_failed": "Failed to exchange authorization code for access token. Please try again.",
+      "firebase_list_failed": "Could not retrieve Firebase projects. Verify your Google account has Firebase access.",
+      "no_firebase_projects": "No Firebase projects found. Create one at console.firebase.google.com first."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Frigate Notify Bridge Options",
+        "menu_options": {
+          "connection_settings": "Connection Settings",
+          "notification_settings": "Notification Settings",
+          "device_management": "Manage Devices"
+        }
+      },
+      "connection_settings": {
+        "title": "Connection Settings",
+        "description": "Configure the Frigate URL and home WiFi networks for local/remote switching.",
+        "data": {
+          "frigate_url": "Frigate API URL (e.g. http://192.168.1.100:5000)",
+          "home_ssids": "Home WiFi network names (SSIDs)"
+        }
+      },
+      "notification_settings": {
+        "title": "Notification Settings",
+        "description": "Configure global notification behavior.",
+        "data": {
+          "cooldown_seconds": "Cooldown between notifications (seconds)",
+          "include_thumbnail": "Include thumbnail in notifications",
+          "include_snapshot": "Include full snapshot in notifications"
+        }
+      },
+      "device_management": {
+        "title": "Manage Paired Devices",
+        "description": "You have {device_count} paired device(s). Select devices to remove.",
+        "data": {
+          "remove_devices": "Devices to remove"
+        }
+      }
+    },
+    "abort": {
+      "not_configured": "Integration not fully configured",
+      "no_devices": "No devices are currently paired"
+    }
+  }
+}
