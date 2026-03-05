@@ -110,7 +110,7 @@
       },
       "add_device": {
         "title": "Add Device",
-        "description": "Scan the QR code below with the Frigate Mobile app to pair a new device.\n\nCode: **{code}** (expires in {expires_in} minutes)\n\n![Pairing QR Code]({qr_image})"
+        "description": "Scan the QR code below with the Frigate Mobile app to pair a new device.\n\nCode: **{code}** (expires in {expires_in} minutes)\n\n![Pairing QR Code]({qr_image})\n\n> **Tip:** If the code has expired, go back and select **Add Device** again — a fresh QR code is generated each time."
       }
     },
     "abort": {
