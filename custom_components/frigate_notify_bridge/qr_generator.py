@@ -43,27 +43,32 @@ def _get_cloud_url(hass: HomeAssistant) -> str | None:
         if cloud is None:
             return None
 
-        # Check if cloud is connected
-        if not cloud.is_logged_in or not cloud.is_connected:
+        # Return the cloud URL if logged in — even if remote UI is transiently
+        # disconnected. We only need the URL structure, not an active connection.
+        if not cloud.is_logged_in:
             return None
 
-        # Get the remote UI URL
-        # This is the Nabu Casa remote access URL
+        # Get the Nabu Casa instance ID regardless of remote.is_connected state
+        # (the URL is stable as long as the user is logged in)
+        try:
+            instance_id = cloud.client.prefs.instance_id
+            if instance_id:
+                clean_id = str(instance_id).replace("-", "").replace(" ", "").strip()
+                return f"https://{clean_id}.ui.nabu.casa"
+        except AttributeError:
+            pass
+
+        # Fallback: try cloud.remote even if not currently connected
         if hasattr(cloud, "remote") and cloud.remote:
             remote = cloud.remote
-            if hasattr(remote, "is_connected") and remote.is_connected:
-                # The cloud remote URL format
-                instance_id = cloud.client.prefs.instance_id
-                if instance_id:
-                    # Sanitize: remove dashes, spaces, and whitespace
-                    clean_id = str(instance_id).replace("-", "").replace(" ", "").strip()
-                    return f"https://{clean_id}.ui.nabu.casa"
+            if hasattr(remote, "instance_domain") and remote.instance_domain:
+                return f"https://{remote.instance_domain}"
 
         return None
+
     except Exception as e:
         _LOGGER.debug("Could not get cloud URL: %s", e)
         return None
-
 
 def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None:
     """Get Nabu Casa WebRTC relay configuration if available."""

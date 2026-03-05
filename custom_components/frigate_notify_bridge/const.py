@@ -143,6 +143,7 @@ STORAGE_VERSION: Final = 1
 # Signals
 SIGNAL_DEVICE_REGISTERED: Final = f"{DOMAIN}_device_registered"
 SIGNAL_DEVICE_REMOVED: Final = f"{DOMAIN}_device_removed"
+SIGNAL_DEVICE_UPDATED: Final = f"{DOMAIN}_device_updated"
 SIGNAL_CONFIG_UPDATED: Final = f"{DOMAIN}_config_updated"
 
 # Firebase client configuration (for mobile app dynamic init)
@@ -169,4 +170,7 @@ EVENT_DEVICE_PAIRED: Final = f"{DOMAIN}_device_paired"
 EVENT_DEVICE_REMOVED: Final = f"{DOMAIN}_device_removed"
 
 # Platforms
-PLATFORMS: Final = ["image"]
+PLATFORMS: Final = ["binary_sensor", "button", "image", "sensor", "switch"]
+
+# Per-device entity constants
+DEVICE_ONLINE_THRESHOLD_MINUTES: Final = 5
