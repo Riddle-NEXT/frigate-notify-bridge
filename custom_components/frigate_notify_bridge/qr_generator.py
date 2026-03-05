@@ -15,6 +15,23 @@ from .const import QR_CODE_VERSION
 _LOGGER = logging.getLogger(__name__)
 
 
+def _sanitize_url(url: str | None) -> str | None:
+    """Remove embedded whitespace from a URL (e.g. spaces in Nabu Casa instance IDs)."""
+    if url is None:
+        return None
+    url = url.strip()
+    if not url:
+        return None
+    try:
+        from urllib.parse import urlparse, urlunparse
+        parsed = urlparse(url)
+        clean_netloc = parsed.netloc.replace(" ", "")
+        if clean_netloc != parsed.netloc:
+            url = urlunparse(parsed._replace(netloc=clean_netloc))
+    except Exception:
+        url = url.replace(" ", "")
+    return url
+
 def _get_cloud_url(hass: HomeAssistant) -> str | None:
     """Get the Nabu Casa cloud URL if available."""
     try:
@@ -105,7 +122,7 @@ def generate_pairing_qr_data(
     """
     # Get HA URLs
     try:
-        internal_url = get_url(hass, prefer_external=False, allow_cloud=False)
+        internal_url = _sanitize_url(get_url(hass, prefer_external=False, allow_cloud=False))
     except Exception:
         internal_url = None
 
@@ -127,7 +144,7 @@ def generate_pairing_qr_data(
 
     if not external_url:
         try:
-            external_url = get_url(hass, prefer_external=True, allow_cloud=True)
+            external_url = _sanitize_url(get_url(hass, prefer_external=True, allow_cloud=True))
         except Exception:
             external_url = None
 
