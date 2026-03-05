@@ -663,7 +663,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
         relay_url = self.config_entry.data.get(CONF_RELAY_URL)
         e2e_key = self.config_entry.data.get(CONF_RELAY_E2E_KEY)
 
-        qr_data = generate_pairing_qr_data(
+        qr_data = await generate_pairing_qr_data(
             hass=self.hass,
             pairing_info=pairing_info,
             frigate_url=self.config_entry.data.get(CONF_FRIGATE_URL),

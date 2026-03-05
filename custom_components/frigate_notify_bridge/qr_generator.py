@@ -32,40 +32,13 @@ def _sanitize_url(url: str | None) -> str | None:
         url = url.replace(" ", "")
     return url
 
-def _get_cloud_url(hass: HomeAssistant) -> str | None:
-    """Get the Nabu Casa cloud URL if available."""
+async def _get_cloud_url(hass: HomeAssistant) -> str | None:
+    """Get the Nabu Casa cloud remote UI URL if available."""
     try:
-        # Check if cloud component is loaded
         if "cloud" not in hass.config.components:
             return None
-
-        cloud = hass.data.get("cloud")
-        if cloud is None:
-            return None
-
-        # Return the cloud URL if logged in — even if remote UI is transiently
-        # disconnected. We only need the URL structure, not an active connection.
-        if not cloud.is_logged_in:
-            return None
-
-        # Get the Nabu Casa instance ID regardless of remote.is_connected state
-        # (the URL is stable as long as the user is logged in)
-        try:
-            instance_id = cloud.client.prefs.instance_id
-            if instance_id:
-                clean_id = str(instance_id).replace("-", "").replace(" ", "").strip()
-                return f"https://{clean_id}.ui.nabu.casa"
-        except AttributeError:
-            pass
-
-        # Fallback: try cloud.remote even if not currently connected
-        if hasattr(cloud, "remote") and cloud.remote:
-            remote = cloud.remote
-            if hasattr(remote, "instance_domain") and remote.instance_domain:
-                return f"https://{remote.instance_domain}"
-
-        return None
-
+        from homeassistant.components import cloud as cloud_component
+        return await cloud_component.async_remote_ui_url(hass)
     except Exception as e:
         _LOGGER.debug("Could not get cloud URL: %s", e)
         return None
@@ -98,7 +71,7 @@ def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None:
         return None
 
 
-def generate_pairing_qr_data(
+async def generate_pairing_qr_data(
     hass: HomeAssistant,
     pairing_info: dict[str, Any],
     frigate_url: str | None = None,
@@ -142,7 +115,7 @@ def generate_pairing_qr_data(
     if custom_external_url:
         external_url = custom_external_url
     elif use_cloud_remote:
-        cloud_url = _get_cloud_url(hass)
+        cloud_url = await _get_cloud_url(hass)
         if cloud_url:
             external_url = cloud_url
             webrtc_config = _get_cloud_webrtc_config(hass)

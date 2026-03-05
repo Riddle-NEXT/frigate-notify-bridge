@@ -121,7 +121,7 @@ class PairingQRView(BaseAPIView):
         e2e_key = self.entry.data.get(CONF_RELAY_E2E_KEY)
 
         # Generate QR data
-        qr_data = generate_pairing_qr_data(
+        qr_data = await generate_pairing_qr_data(
             hass=request.app["hass"],
             pairing_info=pairing_info,
             frigate_url=frigate_url,
