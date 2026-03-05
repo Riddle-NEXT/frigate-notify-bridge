@@ -15,6 +15,7 @@ from .const import (
     PAIRING_CODE_LENGTH,
     SIGNAL_DEVICE_REGISTERED,
     SIGNAL_DEVICE_REMOVED,
+    SIGNAL_DEVICE_UPDATED,
     EVENT_DEVICE_PAIRED,
     EVENT_DEVICE_REMOVED,
 )
@@ -168,6 +169,9 @@ class DeviceManager:
                 "quiet_hours_start": None,
                 "quiet_hours_end": None,
             },
+            "alert_count_today": 0,
+            "alert_count_total": 0,
+            "alert_count_date": datetime.utcnow().strftime("%Y-%m-%d"),
         }
 
         self._devices[device_id] = device
@@ -384,3 +388,22 @@ class DeviceManager:
             _LOGGER.debug("Cleaned up %d expired pairing tokens", removed)
 
         return removed
+
+    async def async_increment_alert_count(self, device_id: str) -> None:
+        """Increment alert counters for a device, resetting today's count at midnight."""
+        if device_id not in self._devices:
+            return
+
+        device = self._devices[device_id]
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+        # Reset today counter if day has rolled over
+        if device.get("alert_count_date") != today:
+            device["alert_count_today"] = 0
+            device["alert_count_date"] = today
+
+        device["alert_count_today"] = device.get("alert_count_today", 0) + 1
+        device["alert_count_total"] = device.get("alert_count_total", 0) + 1
+
+        await self.async_save()
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_UPDATED, device_id)

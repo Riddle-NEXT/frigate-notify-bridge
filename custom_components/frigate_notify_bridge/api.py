@@ -27,6 +27,7 @@ from .const import (
     CONF_RELAY_BRIDGE_ID,
     CONF_RELAY_BRIDGE_SECRET,
     CONF_RELAY_E2E_KEY,
+    SIGNAL_DEVICE_UPDATED,
 )
 from .qr_generator import (
     generate_pairing_qr_data,
@@ -382,6 +383,10 @@ class DeviceView(BaseAPIView):
                 {"error": "Device not found"},
                 status=404,
             )
+
+        # Notify HA entities of the change
+        from homeassistant.helpers.dispatcher import async_dispatcher_send
+        async_dispatcher_send(request.app["hass"], SIGNAL_DEVICE_UPDATED, device_id)
 
         return web.json_response({
             "success": True,

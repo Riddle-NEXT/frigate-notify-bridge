@@ -94,12 +94,14 @@ class FrigateNotifyCoordinator:
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
         device_tokens = []
+        notified_devices = []
         for device in devices:
             if use_relay and device.get("relay_device_id"):
                 device_tokens.append(device["relay_device_id"])
+                notified_devices.append(device)
             elif device.get("fcm_token"):
                 device_tokens.append(device["fcm_token"])
-
+                notified_devices.append(device)
         if not device_tokens:
             _LOGGER.debug("No device tokens available for notification")
             return
@@ -113,6 +115,11 @@ class FrigateNotifyCoordinator:
         )
 
         results = await self.push_provider.async_send_to_many(device_tokens, payload)
+
+        # Increment alert counts for successful sends
+        for device, result in zip(notified_devices, results):
+            if result.success:
+                await self.device_manager.async_increment_alert_count(device["id"])
 
         # Log results
         success_count = sum(1 for r in results if r.success)

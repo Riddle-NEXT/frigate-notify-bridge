@@ -491,6 +491,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                 "connection_settings": "Connection Settings",
                 "notification_settings": "Notification Settings",
                 "device_management": "Manage Devices",
+                "add_device": "Add Device",
             },
         )
 
@@ -506,10 +507,18 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data
             )
-            return self.async_create_entry(title="", data={})
+            # external_url goes into options (api.py reads from entry.options)
+            external_url = user_input.get("external_url", "").strip()
+            new_options = {**self.config_entry.options}
+            if external_url:
+                new_options["external_url"] = external_url
+            else:
+                new_options.pop("external_url", None)
+            return self.async_create_entry(title="", data=new_options)
 
         current_url = self.config_entry.data.get(CONF_FRIGATE_URL, "")
         current_ssids = self.config_entry.data.get(CONF_HOME_SSIDS, [])
+        current_external_url = self.config_entry.options.get("external_url", "")
 
         return self.async_show_form(
             step_id="connection_settings",
@@ -528,6 +537,12 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                             custom_value=True,
                             multiple=True,
                         )
+                    ),
+                    vol.Optional(
+                        "external_url",
+                        default=current_external_url,
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
                     ),
                 }
             ),
@@ -614,5 +629,67 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             ),
             description_placeholders={
                 "device_count": str(len(devices)),
+            },
+        )
+
+    async def async_step_add_device(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Generate a fresh pairing QR code and display it inline."""
+        data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        device_manager = data.get("device_manager")
+        coordinator = data.get("coordinator")
+
+        if device_manager is None:
+            return self.async_abort(reason="not_configured")
+
+        if user_input is not None:
+            # User clicked Submit (Done) — just close the flow
+            return self.async_create_entry(title="", data={})
+
+        # Generate fresh pairing code every time this step is displayed
+        pairing_info = device_manager.generate_pairing_code()
+
+        from .const import CONF_PUSH_PROVIDER, CONF_RELAY_URL, CONF_RELAY_E2E_KEY
+        from .qr_generator import generate_pairing_qr_data, generate_qr_code_base64
+
+        push_provider = self.config_entry.data.get(CONF_PUSH_PROVIDER)
+        fcm_sender_id = None
+        if coordinator and hasattr(coordinator, "push_provider"):
+            fcm_sender_id = coordinator.push_provider.get_sender_id()
+
+        custom_external_url = self.config_entry.options.get("external_url")
+        use_cloud = self.config_entry.options.get("use_cloud_remote", True)
+        relay_url = self.config_entry.data.get(CONF_RELAY_URL)
+        e2e_key = self.config_entry.data.get(CONF_RELAY_E2E_KEY)
+
+        qr_data = generate_pairing_qr_data(
+            hass=self.hass,
+            pairing_info=pairing_info,
+            frigate_url=self.config_entry.data.get(CONF_FRIGATE_URL),
+            frigate_auth_required=bool(self.config_entry.data.get("frigate_username")),
+            push_provider=push_provider,
+            fcm_sender_id=fcm_sender_id,
+            custom_external_url=custom_external_url,
+            use_cloud_remote=use_cloud,
+            relay_url=relay_url,
+            e2e_key=e2e_key,
+        )
+
+        try:
+            qr_b64 = await generate_qr_code_base64(qr_data, 300)
+            qr_image_uri = f"data:image/png;base64,{qr_b64}"
+        except Exception:
+            qr_image_uri = ""
+
+        expires_min = pairing_info["expires_in"] // 60
+
+        return self.async_show_form(
+            step_id="add_device",
+            data_schema=vol.Schema({}),
+            description_placeholders={
+                "code": pairing_info["code"],
+                "expires_in": str(expires_min),
+                "qr_image": qr_image_uri,
             },
         )
