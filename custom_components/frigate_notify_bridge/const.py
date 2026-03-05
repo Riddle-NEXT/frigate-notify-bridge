@@ -170,7 +170,7 @@ EVENT_DEVICE_PAIRED: Final = f"{DOMAIN}_device_paired"
 EVENT_DEVICE_REMOVED: Final = f"{DOMAIN}_device_removed"
 
 # Platforms
-PLATFORMS: Final = ["binary_sensor", "button", "image", "sensor", "switch"]
+PLATFORMS: Final = ["binary_sensor", "button", "sensor", "switch"]
 
 # Per-device entity constants
 DEVICE_ONLINE_THRESHOLD_MINUTES: Final = 5
