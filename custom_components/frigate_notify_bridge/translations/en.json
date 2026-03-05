@@ -79,7 +79,8 @@
         "menu_options": {
           "connection_settings": "Connection Settings",
           "notification_settings": "Notification Settings",
-          "device_management": "Manage Devices"
+          "device_management": "Manage Devices",
+          "add_device": "Add Device"
         }
       },
       "connection_settings": {
@@ -87,7 +88,8 @@
         "description": "Configure the Frigate URL and home WiFi networks for local/remote switching.",
         "data": {
           "frigate_url": "Frigate API URL (e.g. http://192.168.1.100:5000)",
-          "home_ssids": "Home WiFi network names (SSIDs)"
+          "home_ssids": "Home WiFi network names (SSIDs)",
+          "external_url": "External URL (for remote access, e.g. https://frigate.yourdomain.com)"
         }
       },
       "notification_settings": {
@@ -105,6 +107,10 @@
         "data": {
           "remove_devices": "Devices to remove"
         }
+      },
+      "add_device": {
+        "title": "Add Device",
+        "description": "Scan the QR code below with the Frigate Mobile app to pair a new device.\n\nCode: **{code}** (expires in {expires_in} minutes)\n\n![Pairing QR Code]({qr_image})"
       }
     },
     "abort": {
