@@ -79,7 +79,8 @@
         "menu_options": {
           "connection_settings": "Connection Settings",
           "notification_settings": "Notification Settings",
-          "device_management": "Manage Devices"
+          "device_management": "Manage Devices",
+          "add_device": "Add Device"
         }
       },
       "connection_settings": {
@@ -105,6 +106,10 @@
         "data": {
           "remove_devices": "Devices to remove"
         }
+      },
+      "add_device": {
+        "title": "Add Device",
+        "description": "Scan the QR code below with the Frigate Mobile app to pair a new device.\n\nCode: **{code}** (expires in {expires_in} minutes)\n\n![Pairing QR Code]({qr_image})\n\n> **Tip:** If the code has expired, go back and select **Add Device** again \u2014 a fresh QR code is generated each time."
       }
     },
     "abort": {
