@@ -18,6 +18,7 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_DEBUG_LOGGING,
     DOMAIN,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
@@ -481,6 +482,10 @@ class FrigateNotifyBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Frigate Notify Bridge."""
 
+    def _merged_options(self, updates: dict[str, Any]) -> dict[str, Any]:
+        """Merge option updates without dropping unrelated saved values."""
+        return {**self.config_entry.options, **updates}
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -490,6 +495,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             menu_options={
                 "connection_settings": "Connection Settings",
                 "notification_settings": "Notification Settings",
+                "diagnostics": "Diagnostics",
                 "device_management": "Manage Devices",
                 "add_device": "Add Device",
             },
@@ -553,7 +559,10 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Configure notification settings."""
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            return self.async_create_entry(
+                title="",
+                data=self._merged_options(user_input),
+            )
 
         return self.async_show_form(
             step_id="notification_settings",
@@ -585,6 +594,30 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             ),
         )
 
+    async def async_step_diagnostics(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure integration diagnostics options."""
+        if user_input is not None:
+            return self.async_create_entry(
+                title="",
+                data=self._merged_options(user_input),
+            )
+
+        return self.async_show_form(
+            step_id="diagnostics",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_DEBUG_LOGGING,
+                        default=self.config_entry.options.get(
+                            CONF_DEBUG_LOGGING, False
+                        ),
+                    ): selector.BooleanSelector(),
+                }
+            ),
+        )
+
     async def async_step_device_management(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -601,7 +634,10 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             devices_to_remove = user_input.get("remove_devices", [])
             for device_id in devices_to_remove:
                 await device_manager.async_remove_device(device_id)
-            return self.async_create_entry(title="", data={})
+            return self.async_create_entry(
+                title="",
+                data=dict(self.config_entry.options),
+            )
 
         if not devices:
             return self.async_abort(reason="no_devices")
@@ -645,7 +681,10 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             # User clicked Submit (Done) — just close the flow
-            return self.async_create_entry(title="", data={})
+            return self.async_create_entry(
+                title="",
+                data=dict(self.config_entry.options),
+            )
 
         # Generate fresh pairing code every time this step is displayed
         pairing_info = device_manager.generate_pairing_code()

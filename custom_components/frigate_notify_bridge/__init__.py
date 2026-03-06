@@ -18,6 +18,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
+    CONF_DEBUG_LOGGING,
     DOMAIN,
     PLATFORMS,
     CONF_USE_HA_MQTT,
@@ -37,6 +38,17 @@ from .device_manager import DeviceManager
 from .push_providers import create_push_provider
 
 _LOGGER = logging.getLogger(__name__)
+_DOMAIN_LOGGER = logging.getLogger(f"custom_components.{DOMAIN}")
+
+
+def _apply_runtime_logging(entry: ConfigEntry) -> None:
+    """Apply runtime logging overrides from config entry options."""
+    debug_enabled = bool(entry.options.get(CONF_DEBUG_LOGGING, False))
+    _DOMAIN_LOGGER.setLevel(logging.DEBUG if debug_enabled else logging.NOTSET)
+    _LOGGER.info(
+        "Integration debug logging %s via options",
+        "enabled" if debug_enabled else "disabled",
+    )
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -47,6 +59,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Frigate Notify Bridge from a config entry."""
+    _apply_runtime_logging(entry)
     _LOGGER.info("Setting up Frigate Notify Bridge integration")
 
     hass.data.setdefault(DOMAIN, {})
@@ -194,6 +207,7 @@ async def _ensure_relay_registration(hass: HomeAssistant, entry: ConfigEntry) ->
 
 async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Handle options update."""
+    _apply_runtime_logging(entry)
     await hass.config_entries.async_reload(entry.entry_id)
 
 

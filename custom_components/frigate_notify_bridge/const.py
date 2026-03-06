@@ -16,6 +16,7 @@ CONF_MQTT_TOPIC_PREFIX: Final = "mqtt_topic_prefix"
 CONF_USE_HA_MQTT: Final = "use_ha_mqtt"
 CONF_USE_FRIGATE_INTEGRATION: Final = "use_frigate_integration"
 CONF_HOME_SSIDS: Final = "home_ssids"
+CONF_DEBUG_LOGGING: Final = "debug_logging"
 
 # Push provider configuration
 CONF_PUSH_PROVIDER: Final = "push_provider"
