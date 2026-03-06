@@ -64,6 +64,23 @@ class DeviceManager:
         - token: Full token for QR code
         - expires_at: Expiration timestamp
         """
+        self.cleanup_expired_pairings()
+
+        # The add-device flow should expose exactly one active QR code at a
+        # time so a retried pairing attempt cannot accidentally validate
+        # against stale in-memory state.
+        if self._pending_pairings:
+            pending_codes = {
+                data.get("code")
+                for data in self._pending_pairings.values()
+                if data.get("code")
+            }
+            self._pending_pairings.clear()
+            _LOGGER.debug(
+                "Cleared %d stale pending pairing(s) before issuing a new code",
+                len(pending_codes),
+            )
+
         # Generate a readable pairing code (6 alphanumeric chars)
         code = "".join(
             secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
