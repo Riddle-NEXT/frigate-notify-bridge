@@ -278,6 +278,11 @@ class DeviceManager:
         self._devices[device_id]["fcm_token"] = fcm_token
         self._devices[device_id]["last_seen"] = datetime.utcnow().isoformat()
         await self.async_save()
+        _LOGGER.info(
+            "FCM token updated for device %s (%s)",
+            self._devices[device_id].get("name"),
+            device_id,
+        )
         return True
 
     def validate_api_token(self, api_token: str) -> str | None:
