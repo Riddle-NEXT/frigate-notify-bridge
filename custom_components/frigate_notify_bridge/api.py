@@ -596,30 +596,36 @@ class WebRTCCredentialsView(BaseAPIView):
                     status=404,
                 )
 
-            # Get WebRTC credentials
-            # Note: The actual API for this may vary based on HA version
-            if hasattr(cloud, "client") and hasattr(cloud.client, "webrtc"):
-                webrtc = cloud.client.webrtc
-                if webrtc:
-                    # Get TURN servers with credentials
-                    turn_servers = await webrtc.async_get_turn_servers()
+        # Get ICE servers using the stable HA 2026+ web_rtc API.
+        # async_get_ice_servers returns the merged list: user config +
+        # default STUN + Nabu Casa cloud-provided TURN servers.
+        if "web_rtc" in hass.config.components:
+            from homeassistant.components.web_rtc import async_get_ice_servers
+            ice_servers = async_get_ice_servers(hass)
+            ice_servers_json = [
+                {
+                    "urls": s.urls if isinstance(s.urls, list) else [s.urls],
+                    **(({"username": s.username} if s.username else {})),
+                    **(({"credential": s.credential} if s.credential else {})),
+                }
+                for s in ice_servers
+            ]
+            return web.json_response({
+                "ice_servers": ice_servers_json,
+                "expires_in": 3600,
+            })
 
-                    return web.json_response({
-                        "ice_servers": turn_servers,
-                        "expires_in": 3600,  # Credentials typically valid for 1 hour
-                    })
+        return web.json_response(
+            {"error": "WebRTC not available"},
+            status=404,
+        )
 
-            return web.json_response(
-                {"error": "WebRTC not available"},
-                status=404,
-            )
-
-        except Exception as e:
-            _LOGGER.error("Failed to get WebRTC credentials: %s", e)
-            return web.json_response(
-                {"error": "Failed to get credentials"},
-                status=500,
-            )
+    except Exception as e:
+        _LOGGER.error("Failed to get WebRTC credentials: %s", e)
+        return web.json_response(
+            {"error": "Failed to get credentials"},
+            status=500,
+        )
 
 
 class FrigateProxyView(BaseAPIView):

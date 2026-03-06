@@ -43,8 +43,12 @@ async def _get_cloud_url(hass: HomeAssistant) -> str | None:
         _LOGGER.debug("Could not get cloud URL: %s", e)
         return None
 
-def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None:
-    """Get Nabu Casa WebRTC relay configuration if available."""
+async def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None:
+    """Return a flag indicating Nabu Casa WebRTC relay is available.
+
+    The mobile app fetches actual TURN credentials on demand via the
+    /webrtc/credentials endpoint; the QR payload only signals availability.
+    """
     try:
         if "cloud" not in hass.config.components:
             return None
@@ -53,19 +57,24 @@ def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None:
         if cloud is None or not cloud.is_logged_in:
             return None
 
-        # Check for WebRTC component/relay support
-        # Nabu Casa provides TURN/STUN servers for WebRTC
-        if hasattr(cloud, "client") and hasattr(cloud.client, "webrtc"):
-            webrtc = cloud.client.webrtc
-            if webrtc and hasattr(webrtc, "turn_servers"):
+        # Use the stable HA 2026+ API: async_get_ice_servers aggregates local,
+        # default STUN, and Nabu Casa cloud-provided ICE servers.
+        if "web_rtc" in hass.config.components:
+            from homeassistant.components.web_rtc import async_get_ice_servers
+            ice_servers = async_get_ice_servers(hass)
+            if ice_servers:
                 return {
                     "enabled": True,
                     "provider": "nabu_casa",
-                    # Don't include actual credentials in QR - app will request them
                     "relay_available": True,
                 }
 
-        return None
+        # Fallback: cloud is logged in, assume WebRTC relay may be available
+        return {
+            "enabled": True,
+            "provider": "nabu_casa",
+            "relay_available": True,
+        }
     except Exception as e:
         _LOGGER.debug("Could not get WebRTC config: %s", e)
         return None
@@ -118,7 +127,7 @@ async def generate_pairing_qr_data(
         cloud_url = await _get_cloud_url(hass)
         if cloud_url:
             external_url = cloud_url
-            webrtc_config = _get_cloud_webrtc_config(hass)
+            webrtc_config = await _get_cloud_webrtc_config(hass)
 
     if not external_url:
         try:
