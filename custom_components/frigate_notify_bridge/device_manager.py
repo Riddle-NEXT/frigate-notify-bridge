@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
@@ -218,6 +219,14 @@ class DeviceManager:
 
         device = self._devices.pop(device_id)
         await self.async_save()
+
+        # Remove the HA device registry entry so it doesn't linger as an orphan
+        device_registry = dr.async_get(self.hass)
+        device_entry = device_registry.async_get_device(
+            identifiers={(DOMAIN, device_id)}
+        )
+        if device_entry:
+            device_registry.async_remove_device(device_entry.id)
 
         # Notify listeners
         async_dispatcher_send(self.hass, SIGNAL_DEVICE_REMOVED, device_id)
