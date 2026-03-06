@@ -373,10 +373,8 @@ class DeviceView(BaseAPIView):
     url = f"{API_BASE_PATH}/devices/{{device_id}}"
     name = "api:frigate_notify_bridge:device"
 
-    async def get(self, request: web.Request) -> web.Response:
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
         """Get device details."""
-        device_id = request.match_info["device_id"]
-
         # Validate token
         token_device_id = self._validate_api_token(request)
         if token_device_id != device_id:
@@ -401,10 +399,8 @@ class DeviceView(BaseAPIView):
             "notification_settings": device.get("notification_settings", {}),
         })
 
-    async def patch(self, request: web.Request) -> web.Response:
+    async def patch(self, request: web.Request, device_id: str) -> web.Response:
         """Update device settings."""
-        device_id = request.match_info["device_id"]
-
         # Validate token
         token_device_id = self._validate_api_token(request)
         if token_device_id != device_id:
@@ -443,10 +439,8 @@ class DeviceView(BaseAPIView):
             },
         })
 
-    async def delete(self, request: web.Request) -> web.Response:
+    async def delete(self, request: web.Request, device_id: str) -> web.Response:
         """Remove/unpair device."""
-        device_id = request.match_info["device_id"]
-
         # Validate token (device can remove itself)
         token_device_id = self._validate_api_token(request)
         if token_device_id != device_id:
@@ -471,10 +465,8 @@ class DeviceTokenView(BaseAPIView):
     url = f"{API_BASE_PATH}/devices/{{device_id}}/token"
     name = "api:frigate_notify_bridge:device_token"
 
-    async def post(self, request: web.Request) -> web.Response:
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
         """Update device's FCM token."""
-        device_id = request.match_info["device_id"]
-
         # Validate API token
         token_device_id = self._validate_api_token(request)
         if token_device_id != device_id:
@@ -852,10 +844,8 @@ class FrigateCredentialsView(BaseAPIView):
     url = f"{API_BASE_PATH}/devices/{{device_id}}/frigate_credentials"
     name = "api:frigate_notify_bridge:frigate_credentials"
 
-    async def post(self, request: web.Request) -> web.Response:
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
         """Store Frigate credentials for a device."""
-        device_id = request.match_info["device_id"]
-
         # Validate API token (device can only set its own credentials)
         token_device_id = self._validate_api_token(request)
         if token_device_id != device_id:
