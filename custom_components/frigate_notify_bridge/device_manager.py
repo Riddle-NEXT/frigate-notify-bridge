@@ -119,15 +119,30 @@ class DeviceManager:
         """
         pairing_data = self._pending_pairings.get(token_or_code)
         if pairing_data is None:
+            _LOGGER.debug(
+                "Rejected pairing lookup for unknown token/code: len=%d prefix=%s",
+                len(token_or_code),
+                token_or_code[:8],
+            )
             return None
 
         # Check expiration
         expires_at = datetime.fromisoformat(pairing_data["expires_at"])
         if datetime.utcnow() > expires_at:
             # Clean up expired pairing
+            _LOGGER.debug(
+                "Rejected expired pairing token/code for code=%s expired_at=%s",
+                pairing_data.get("code"),
+                pairing_data["expires_at"],
+            )
             self._cleanup_pairing(pairing_data)
             return None
 
+        _LOGGER.debug(
+            "Validated pairing token/code for code=%s expires_at=%s",
+            pairing_data.get("code"),
+            pairing_data["expires_at"],
+        )
         return pairing_data
 
     def _cleanup_pairing(self, pairing_data: dict[str, Any]) -> None:
