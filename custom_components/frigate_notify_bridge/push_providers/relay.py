@@ -116,6 +116,12 @@ class RelayPushProvider(PushProvider):
         }
 
         try:
+            _LOGGER.debug(
+                "Relay send request: bridge_id=%s devices=%s payload_bytes=%d",
+                self._bridge_id,
+                device_tokens,
+                len(encrypted),
+            )
             session = async_get_clientsession(self.hass)
             async with session.post(
                 f"{self._relay_url}/sendNotification",
@@ -124,6 +130,12 @@ class RelayPushProvider(PushProvider):
                 timeout=15,
             ) as resp:
                 data = await resp.json()
+                _LOGGER.debug(
+                    "Relay send response: status=%d bridge_id=%s body=%s",
+                    resp.status,
+                    self._bridge_id,
+                    data,
+                )
 
                 if resp.status == 200:
                     sent = data.get("sent", 0)

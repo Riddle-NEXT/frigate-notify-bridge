@@ -279,6 +279,12 @@ class DeviceManager:
                     device[key] = updates[key]
 
         device["last_seen"] = datetime.utcnow().isoformat()
+        _LOGGER.debug(
+            "Updated device %s fields=%s last_seen=%s",
+            device_id,
+            list(updates.keys()),
+            device["last_seen"],
+        )
 
         await self.async_save()
         return device

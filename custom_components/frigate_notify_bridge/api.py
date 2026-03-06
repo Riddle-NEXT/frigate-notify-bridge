@@ -85,7 +85,23 @@ class BaseAPIView(HomeAssistantView):
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:]
-            return self.device_manager.validate_api_token(token)
+            device_id = self.device_manager.validate_api_token(token)
+            if device_id:
+                _LOGGER.debug(
+                    "Validated API token for device %s on %s %s",
+                    device_id,
+                    request.method,
+                    request.path,
+                )
+            else:
+                _LOGGER.warning(
+                    "Rejected API token on %s %s from %s",
+                    request.method,
+                    request.path,
+                    request.remote,
+                )
+            return device_id
+        _LOGGER.debug("Missing bearer token on %s %s", request.method, request.path)
         return None
 
 
@@ -208,10 +224,24 @@ class PairDeviceView(BaseAPIView):
             "app_version": data.get("app_version"),
         }
 
+        _LOGGER.debug(
+            "Pair request received: device_name=%s platform=%s has_fcm_token=%s token_length=%s",
+            device_info["name"],
+            device_info["platform"],
+            bool(device_info["fcm_token"]),
+            len(token_or_code),
+        )
+
         try:
             result = await self.device_manager.async_complete_pairing(
                 token_or_code,
                 device_info,
+            )
+            _LOGGER.info(
+                "Pair request succeeded: device_id=%s platform=%s name=%s",
+                result["device_id"],
+                device_info["platform"],
+                device_info["name"],
             )
 
             # Include additional config for the app
@@ -253,6 +283,16 @@ class PairDeviceView(BaseAPIView):
                 config_response["relay_bridge_secret"] = relay_bridge_secret
             if e2e_key:
                 config_response["e2e_key"] = e2e_key
+
+            _LOGGER.debug(
+                "Pairing response config for device %s: push_provider=%s has_firebase_options=%s relay_url=%s relay_bridge_id_present=%s relay_secret_present=%s",
+                result["device_id"],
+                config_response.get("push_provider"),
+                "firebase_options" in config_response,
+                bool(config_response.get("relay_url")),
+                bool(config_response.get("relay_bridge_id")),
+                bool(config_response.get("relay_bridge_secret")),
+            )
 
             # Register device with push relay if available
             relay_device_id = None
@@ -352,6 +392,7 @@ class DeviceView(BaseAPIView):
                 status=404,
             )
 
+        _LOGGER.debug("Returning device details for %s", device_id)
         # Return device info without sensitive data
         return web.json_response({
             "id": device["id"],
@@ -379,6 +420,8 @@ class DeviceView(BaseAPIView):
                 {"error": "Invalid JSON"},
                 status=400,
             )
+
+        _LOGGER.debug("Updating device %s with keys=%s", device_id, list(updates.keys()))
 
         device = await self.device_manager.async_update_device(device_id, updates)
         if not device:
@@ -455,6 +498,11 @@ class DeviceTokenView(BaseAPIView):
                 status=400,
             )
 
+        _LOGGER.debug(
+            "Received FCM token update for device %s token_length=%s",
+            device_id,
+            len(fcm_token),
+        )
         success = await self.device_manager.async_update_fcm_token(
             device_id,
             fcm_token,
@@ -484,6 +532,8 @@ class ConfigView(BaseAPIView):
                 {"error": "Unauthorized"},
                 status=401,
             )
+
+        _LOGGER.debug("Returning config to device %s", device_id)
 
         frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
         push_provider = self.entry.data.get(CONF_PUSH_PROVIDER)
@@ -533,6 +583,7 @@ class StatusView(BaseAPIView):
             "version": "0.1.0",
         }
         if device_id:
+            _LOGGER.debug("Returning authenticated status to device %s", device_id)
             devices = await self.device_manager.async_get_devices()
             base["push_provider"] = {
                 "name": self.coordinator.push_provider.name,
