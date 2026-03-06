@@ -127,16 +127,23 @@ class RelayPushProvider(PushProvider):
 
                 if resp.status == 200:
                     sent = data.get("sent", 0)
-                    _LOGGER.debug("Relay push: %d sent, %d failed", sent, data.get("failed", 0))
+                    failed = data.get("failed", 0)
+                    _LOGGER.debug("Relay push: %d sent, %d failed", sent, failed)
+                    error_by_device: dict[str, str] = {}
+                    for raw_error in data.get("errors", []):
+                        if isinstance(raw_error, str) and ":" in raw_error:
+                            device_id, error = raw_error.split(":", 1)
+                            error_by_device[device_id.strip()] = error.strip()
                     results = []
                     for token in device_tokens:
                         results.append(SendResult(
-                            success=True,
+                            success=token not in error_by_device,
                             device_id=token,
+                            error=error_by_device.get(token),
                         ))
                     return results
                 else:
-                    error = data.get("detail", f"HTTP {resp.status}")
+                    error = data.get("error") or data.get("detail") or f"HTTP {resp.status}"
                     _LOGGER.error("Relay push failed: %s", error)
                     return [
                         SendResult(success=False, device_id=t, error=error)

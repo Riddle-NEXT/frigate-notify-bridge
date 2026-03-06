@@ -244,10 +244,13 @@ class PairDeviceView(BaseAPIView):
             # Include relay info for push notification relay
             relay_url = self.entry.data.get(CONF_RELAY_URL)
             relay_bridge_id = self.entry.data.get(CONF_RELAY_BRIDGE_ID)
+            relay_bridge_secret = self.entry.data.get(CONF_RELAY_BRIDGE_SECRET)
             e2e_key = self.entry.data.get(CONF_RELAY_E2E_KEY)
             if relay_url and relay_bridge_id:
                 config_response["relay_url"] = relay_url
                 config_response["relay_bridge_id"] = relay_bridge_id
+            if relay_bridge_secret:
+                config_response["relay_bridge_secret"] = relay_bridge_secret
             if e2e_key:
                 config_response["e2e_key"] = e2e_key
 
@@ -496,6 +499,18 @@ class ConfigView(BaseAPIView):
         firebase_client_config = self.entry.data.get(CONF_FIREBASE_CLIENT_CONFIG)
         if firebase_client_config:
             config_response["firebase_options"] = firebase_client_config
+        relay_url = self.entry.data.get(CONF_RELAY_URL)
+        relay_bridge_id = self.entry.data.get(CONF_RELAY_BRIDGE_ID)
+        relay_bridge_secret = self.entry.data.get(CONF_RELAY_BRIDGE_SECRET)
+        e2e_key = self.entry.data.get(CONF_RELAY_E2E_KEY)
+        if relay_url:
+            config_response["relay_url"] = relay_url
+        if relay_bridge_id:
+            config_response["relay_bridge_id"] = relay_bridge_id
+        if relay_bridge_secret:
+            config_response["relay_bridge_secret"] = relay_bridge_secret
+        if e2e_key:
+            config_response["e2e_key"] = e2e_key
         return web.json_response(config_response)
 
 

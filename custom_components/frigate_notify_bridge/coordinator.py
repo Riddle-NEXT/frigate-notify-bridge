@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _device_target(device: dict[str, Any], use_relay: bool) -> str | None:
+    """Return the identifier that the active push provider expects."""
+    if use_relay:
+        return device.get("relay_device_id") or device.get("id")
+    return device.get("fcm_token")
+
+
 class FrigateNotifyCoordinator:
     """Coordinate notifications between Frigate events and push providers."""
 
@@ -89,18 +96,17 @@ class FrigateNotifyCoordinator:
         # Build notification payload
         payload = await self._build_notification_payload(event_data)
 
-        # Get device tokens: prefer relay_device_id, fall back to fcm_token
+        # Relay registrations are stored under the bridge device ID unless the
+        # relay assigns a dedicated relay_device_id later.
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
         device_tokens = []
         notified_devices = []
         for device in devices:
-            if use_relay and device.get("relay_device_id"):
-                device_tokens.append(device["relay_device_id"])
-                notified_devices.append(device)
-            elif device.get("fcm_token"):
-                device_tokens.append(device["fcm_token"])
+            token = _device_target(device, use_relay)
+            if token:
+                device_tokens.append(token)
                 notified_devices.append(device)
         if not device_tokens:
             _LOGGER.debug("No device tokens available for notification")
@@ -279,7 +285,7 @@ class FrigateNotifyCoordinator:
             device = await self.device_manager.async_get_device(device_id)
             if not device:
                 return []
-            token = (device.get("relay_device_id") if use_relay else None) or device.get("fcm_token")
+            token = _device_target(device, use_relay)
             if not token:
                 return []
             result = await self.push_provider.async_send(token, payload)
@@ -289,7 +295,7 @@ class FrigateNotifyCoordinator:
         devices = await self.device_manager.async_get_devices()
         tokens = []
         for device in devices.values():
-            token = (device.get("relay_device_id") if use_relay else None) or device.get("fcm_token")
+            token = _device_target(device, use_relay)
             if token:
                 tokens.append(token)
 
