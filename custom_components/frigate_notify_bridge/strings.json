@@ -79,6 +79,7 @@
         "menu_options": {
           "connection_settings": "Connection Settings",
           "notification_settings": "Notification Settings",
+          "diagnostics": "Diagnostics",
           "device_management": "Manage Devices",
           "add_device": "Add Device"
         }
@@ -98,6 +99,13 @@
           "cooldown_seconds": "Cooldown between notifications (seconds)",
           "include_thumbnail": "Include thumbnail in notifications",
           "include_snapshot": "Include full snapshot in notifications"
+        }
+      },
+      "diagnostics": {
+        "title": "Diagnostics",
+        "description": "Control troubleshooting features for the Frigate Notify Bridge integration. Enable debug logging only while diagnosing issues, because it will create more Home Assistant log output.",
+        "data": {
+          "debug_logging": "Enable debug logging"
         }
       },
       "device_management": {
