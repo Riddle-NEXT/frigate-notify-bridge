@@ -817,23 +817,23 @@ class FrigateProxyView(BaseAPIView):
                 {"error": "Failed to reach Frigate"}, status=502
             )
 
-    async def get(self, request: web.Request) -> web.Response:
+    async def get(self, request: web.Request, path: str = "") -> web.Response:
         """Handle GET."""
         return await self._proxy_request(request, "GET")
 
-    async def post(self, request: web.Request) -> web.Response:
+    async def post(self, request: web.Request, path: str = "") -> web.Response:
         """Handle POST."""
         return await self._proxy_request(request, "POST")
 
-    async def put(self, request: web.Request) -> web.Response:
+    async def put(self, request: web.Request, path: str = "") -> web.Response:
         """Handle PUT."""
         return await self._proxy_request(request, "PUT")
 
-    async def delete(self, request: web.Request) -> web.Response:
+    async def delete(self, request: web.Request, path: str = "") -> web.Response:
         """Handle DELETE."""
         return await self._proxy_request(request, "DELETE")
 
-    async def patch(self, request: web.Request) -> web.Response:
+    async def patch(self, request: web.Request, path: str = "") -> web.Response:
         """Handle PATCH."""
         return await self._proxy_request(request, "PATCH")
 
