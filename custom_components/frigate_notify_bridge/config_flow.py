@@ -482,6 +482,10 @@ class FrigateNotifyBridgeConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for Frigate Notify Bridge."""
 
+    def __init__(self) -> None:
+        """Initialize options flow state."""
+        self._active_pairing_info: dict[str, Any] | None = None
+
     def _merged_options(self, updates: dict[str, Any]) -> dict[str, Any]:
         """Merge option updates without dropping unrelated saved values."""
         return {**self.config_entry.options, **updates}
@@ -681,13 +685,27 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             # User clicked Submit (Done) — just close the flow
+            self._active_pairing_info = None
             return self.async_create_entry(
                 title="",
                 data=dict(self.config_entry.options),
             )
 
-        # Generate fresh pairing code every time this step is displayed
-        pairing_info = device_manager.generate_pairing_code()
+        pairing_info = self._active_pairing_info
+        if pairing_info is None:
+            pairing_info = device_manager.generate_pairing_code()
+            self._active_pairing_info = pairing_info
+            _LOGGER.debug(
+                "Generated new add-device pairing code=%s expires_at=%s",
+                pairing_info["code"],
+                pairing_info["expires_at"],
+            )
+        else:
+            _LOGGER.debug(
+                "Reusing active add-device pairing code=%s expires_at=%s",
+                pairing_info["code"],
+                pairing_info["expires_at"],
+            )
 
         from .const import CONF_PUSH_PROVIDER, CONF_RELAY_URL, CONF_RELAY_E2E_KEY
         from .qr_generator import generate_pairing_qr_data, generate_qr_code_base64
@@ -721,7 +739,55 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
         except Exception:
             qr_image_uri = ""
 
-        expires_min = pairing_info["expires_in"] // 60
+        from datetime import datetime, timezone
+
+        expires_at = datetime.fromisoformat(pairing_info["expires_at"])
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        remaining_seconds = max(
+            0,
+            int((expires_at - datetime.now(timezone.utc)).total_seconds()),
+        )
+
+        # If the cached code expired while the dialog remained open, replace it.
+        if remaining_seconds == 0:
+            pairing_info = device_manager.generate_pairing_code()
+            self._active_pairing_info = pairing_info
+            expires_at = datetime.fromisoformat(pairing_info["expires_at"]).replace(
+                tzinfo=timezone.utc
+            )
+            remaining_seconds = max(
+                0,
+                int((expires_at - datetime.now(timezone.utc)).total_seconds()),
+            )
+            _LOGGER.debug(
+                "Regenerated expired add-device pairing code=%s expires_at=%s",
+                pairing_info["code"],
+                pairing_info["expires_at"],
+            )
+
+            qr_data = await generate_pairing_qr_data(
+                hass=self.hass,
+                pairing_info=pairing_info,
+                frigate_url=self.config_entry.data.get(CONF_FRIGATE_URL),
+                frigate_auth_required=bool(
+                    self.config_entry.data.get("frigate_username")
+                ),
+                push_provider=push_provider,
+                fcm_sender_id=fcm_sender_id,
+                custom_external_url=custom_external_url,
+                use_cloud_remote=use_cloud,
+                relay_url=relay_url,
+                e2e_key=e2e_key,
+            )
+
+            try:
+                qr_b64 = await generate_qr_code_base64(qr_data, 300)
+                qr_image_uri = f"data:image/png;base64,{qr_b64}"
+            except Exception:
+                qr_image_uri = ""
+
+        expires_min = max(1, remaining_seconds // 60)
 
         return self.async_show_form(
             step_id="add_device",
