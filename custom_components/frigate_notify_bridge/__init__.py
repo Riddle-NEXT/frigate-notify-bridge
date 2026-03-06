@@ -4,6 +4,7 @@ This integration bridges Frigate NVR events to mobile push notifications,
 supporting FCM, ntfy, and Pushover. It provides QR code pairing for the
 Frigate Mobile app and can optionally leverage the existing Frigate integration.
 """
+
 from __future__ import annotations
 
 import logging
@@ -149,9 +150,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
-async def _ensure_relay_registration(
-    hass: HomeAssistant, entry: ConfigEntry
-) -> None:
+async def _ensure_relay_registration(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Verify relay is reachable and store relay_url in config entry data."""
     import base64
     import os
@@ -186,9 +185,7 @@ async def _ensure_relay_registration(
                     relay_url,
                 )
     except Exception as e:
-        _LOGGER.warning(
-            "Push relay unreachable (%s), will use direct FCM", e
-        )
+        _LOGGER.warning("Push relay unreachable (%s), will use direct FCM", e)
 
     # Persist updated data (e2e key + relay_url) to config entry
     if data != dict(entry.data):
@@ -207,5 +204,34 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     if config_entry.version == 1:
         # Future migrations go here
         pass
+
+    return True
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    device_entry: dr.DeviceEntry,
+) -> bool:
+    """Allow deletion of a paired mobile device from the HA device registry UI."""
+    # Extract the device_id from the device's identifiers
+    device_id = next(
+        (ident[1] for ident in device_entry.identifiers if ident[0] == DOMAIN),
+        None,
+    )
+    if device_id is None:
+        return False
+
+    # Skip the bridge's own device entry (identified by entry_id, not a mobile device_id)
+    if device_id == config_entry.entry_id:
+        return False
+
+    data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if not data:
+        return True  # Allow deletion even if data is already gone
+
+    device_manager = data.get("device_manager")
+    if device_manager:
+        await device_manager.async_remove_device(device_id)
 
     return True
