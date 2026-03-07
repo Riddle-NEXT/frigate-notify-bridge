@@ -23,6 +23,7 @@ from .const import (
     SIGNAL_DEVICE_REMOVED,
     SIGNAL_DEVICE_UPDATED,
 )
+from .device_metadata import build_mobile_device_info, get_device_auth_mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,13 +98,18 @@ class _BaseDeviceSensor(SensorEntity):
 
     @property
     def device_info(self) -> dict:
+        return build_mobile_device_info(self._entry.entry_id, self._device_id, self._device)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
         return {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": self._device.get("name", "Unknown Device"),
-            "manufacturer": "Frigate Mobile",
-            "model": self._device.get("platform", "mobile").title(),
-            "sw_version": self._device.get("app_version"),
-            "via_device": (DOMAIN, self._entry.entry_id),
+            "auth_mode": get_device_auth_mode(self._device),
+            "ha_user_id": self._device.get("ha_user_id"),
+            "mobile_app_device_id": self._device.get("mobile_app_device_id"),
+            "mobile_app_webhook_registered": bool(
+                self._device.get("mobile_app_webhook_id")
+            ),
+            "relay_device_id": self._device.get("relay_device_id"),
         }
 
     async def async_added_to_hass(self) -> None:

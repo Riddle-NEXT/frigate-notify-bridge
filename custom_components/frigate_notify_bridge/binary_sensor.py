@@ -21,6 +21,7 @@ from .const import (
     SIGNAL_DEVICE_REMOVED,
     SIGNAL_DEVICE_UPDATED,
 )
+from .device_metadata import build_mobile_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -87,14 +88,7 @@ class DeviceConnectionStatusEntity(BinarySensorEntity):
     @property
     def device_info(self) -> dict:
         """Return device info linking this entity to the per-device HA device."""
-        return {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": self._device.get("name", "Unknown Device"),
-            "manufacturer": "Frigate Mobile",
-            "model": self._device.get("platform", "mobile").title(),
-            "sw_version": self._device.get("app_version"),
-            "via_device": (DOMAIN, self._entry.entry_id),
-        }
+        return build_mobile_device_info(self._entry.entry_id, self._device_id, self._device)
 
     @property
     def is_on(self) -> bool:
