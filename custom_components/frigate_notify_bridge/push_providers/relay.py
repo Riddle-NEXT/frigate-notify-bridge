@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
+import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
@@ -84,6 +87,23 @@ class RelayPushProvider(PushProvider):
         ciphertext = aesgcm.encrypt(nonce, plaintext, None)
         return base64.b64encode(nonce + ciphertext).decode()
 
+    def _build_signed_headers(self, path: str, body_json: str) -> dict[str, str]:
+        """Build HMAC-signed headers for relay requests."""
+        timestamp = str(int(time.time()))
+        body_hash = hashlib.sha256(body_json.encode()).hexdigest()
+        canonical = "\n".join(["POST", path, timestamp, body_hash])
+        signature = hmac.new(
+            self._bridge_secret.encode(),
+            canonical.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        return {
+            "Authorization": f"Bearer {self._bridge_secret}",
+            "Content-Type": "application/json",
+            "X-Frigate-Timestamp": timestamp,
+            "X-Frigate-Signature": signature,
+        }
+
     async def async_send(
         self,
         device_token: str,
@@ -114,6 +134,9 @@ class RelayPushProvider(PushProvider):
             # title/body intentionally omitted — prevents info leakage through relay.
             # The relay falls back to generic "Frigate Alert" / "New Frigate event".
         }
+        body_json = json.dumps(body, separators=(",", ":"))
+        path = "/sendNotification"
+        headers = self._build_signed_headers(path, body_json)
 
         try:
             _LOGGER.debug(
@@ -124,9 +147,9 @@ class RelayPushProvider(PushProvider):
             )
             session = async_get_clientsession(self.hass)
             async with session.post(
-                f"{self._relay_url}/sendNotification",
-                json=body,
-                headers={"Authorization": f"Bearer {self._bridge_secret}"},
+                f"{self._relay_url}{path}",
+                data=body_json,
+                headers=headers,
                 timeout=15,
             ) as resp:
                 data = await resp.json()
