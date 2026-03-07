@@ -194,6 +194,7 @@ class DeviceManager:
             "fcm_token": device_info.get("fcm_token"),
             "app_version": device_info.get("app_version"),
             "api_token": api_token,
+            "auth_mode": "native_mobile_app" if user_id else "legacy_bridge_token",
             "ha_user_id": user_id,
             "mobile_app_device_id": device_info.get("mobile_app_device_id"),
             "mobile_app_webhook_id": device_info.get("mobile_app_webhook_id"),

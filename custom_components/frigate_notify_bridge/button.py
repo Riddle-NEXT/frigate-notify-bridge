@@ -16,6 +16,7 @@ from .const import (
     SIGNAL_DEVICE_REGISTERED,
     SIGNAL_DEVICE_REMOVED,
 )
+from .device_metadata import build_mobile_device_info
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -97,14 +98,7 @@ class _BaseDeviceButton(ButtonEntity):
 
     @property
     def device_info(self) -> dict:
-        return {
-            "identifiers": {(DOMAIN, self._device_id)},
-            "name": self._device.get("name", "Unknown Device"),
-            "manufacturer": "Frigate Mobile",
-            "model": self._device.get("platform", "mobile").title(),
-            "sw_version": self._device.get("app_version"),
-            "via_device": (DOMAIN, self._entry.entry_id),
-        }
+        return build_mobile_device_info(self._entry.entry_id, self._device_id, self._device)
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
