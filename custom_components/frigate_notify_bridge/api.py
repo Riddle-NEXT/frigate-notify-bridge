@@ -67,7 +67,7 @@ async def async_setup_api(
 class BaseAPIView(HomeAssistantView):
     """Base class for API views."""
 
-    requires_auth = False  # We use our own token auth
+    requires_auth = True
 
     def __init__(
         self,
@@ -80,28 +80,41 @@ class BaseAPIView(HomeAssistantView):
         self.coordinator = coordinator
         self.device_manager = device_manager
 
-    def _validate_api_token(self, request: web.Request) -> str | None:
-        """Validate API token from request and return device_id if valid."""
-        auth_header = request.headers.get("Authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            device_id = self.device_manager.validate_api_token(token)
-            if device_id:
-                _LOGGER.debug(
-                    "Validated API token for device %s on %s %s",
-                    device_id,
-                    request.method,
-                    request.path,
-                )
-            else:
-                _LOGGER.warning(
-                    "Rejected API token on %s %s from %s",
-                    request.method,
-                    request.path,
-                    request.remote,
-                )
+    def _get_authenticated_user_id(self, request: web.Request) -> str | None:
+        """Return the authenticated HA user ID for the request."""
+        user = request.get("hass_user")
+        return getattr(user, "id", None)
+
+    def _resolve_owned_device_id(
+        self,
+        request: web.Request,
+        requested_device_id: str | None = None,
+    ) -> str | None:
+        """Resolve and authorize a bridge device ID for the authenticated user."""
+        user_id = self._get_authenticated_user_id(request)
+        if not user_id:
+            return None
+
+        device_id = requested_device_id or request.headers.get("X-Frigate-Device-Id")
+        if not device_id:
+            _LOGGER.debug(
+                "Missing X-Frigate-Device-Id on %s %s for user %s",
+                request.method,
+                request.path,
+                user_id,
+            )
+            return None
+
+        if self.device_manager.user_owns_device(user_id, device_id):
             return device_id
-        _LOGGER.debug("Missing bearer token on %s %s", request.method, request.path)
+
+        _LOGGER.warning(
+            "User %s attempted to access unauthorized device %s on %s %s",
+            user_id,
+            device_id,
+            request.method,
+            request.path,
+        )
         return None
 
 
@@ -200,6 +213,8 @@ class PairDeviceView(BaseAPIView):
     url = f"{API_BASE_PATH}/pair"
     name = "api:frigate_notify_bridge:pair"
 
+    requires_auth = True
+
     async def post(self, request: web.Request) -> web.Response:
         """Complete device pairing with token/code."""
         try:
@@ -222,6 +237,11 @@ class PairDeviceView(BaseAPIView):
             "platform": data.get("platform", "unknown"),
             "fcm_token": data.get("fcm_token"),
             "app_version": data.get("app_version"),
+            "mobile_app_device_id": data.get("mobile_app_device_id"),
+            "mobile_app_webhook_id": data.get("mobile_app_webhook_id"),
+            "mobile_app_secret": data.get("mobile_app_secret"),
+            "mobile_app_cloudhook_url": data.get("mobile_app_cloudhook_url"),
+            "mobile_app_remote_ui_url": data.get("mobile_app_remote_ui_url"),
         }
 
         _LOGGER.debug(
@@ -233,9 +253,13 @@ class PairDeviceView(BaseAPIView):
         )
 
         try:
+            user_id = self._get_authenticated_user_id(request)
+            if not user_id:
+                return web.json_response({"error": "Unauthorized"}, status=401)
             result = await self.device_manager.async_complete_pairing(
                 token_or_code,
                 device_info,
+                user_id=user_id,
             )
             _LOGGER.info(
                 "Pair request succeeded: device_id=%s platform=%s name=%s",
@@ -254,6 +278,7 @@ class PairDeviceView(BaseAPIView):
                 CONF_HOME_SSIDS,
                 self.entry.data.get(CONF_HOME_SSIDS, []),
             )
+            paired_device = await self.device_manager.async_get_device(result["device_id"])
 
             config_response = {
                 "frigate_url": frigate_url,
@@ -263,6 +288,11 @@ class PairDeviceView(BaseAPIView):
                 "home_ssids": home_ssids,
                 "frigate_auth_required": bool(
                     self.entry.data.get(CONF_FRIGATE_USERNAME)
+                ),
+                "remote_ui_url": (
+                    paired_device.get("mobile_app_remote_ui_url")
+                    if paired_device
+                    else None
                 ),
             }
 
@@ -326,7 +356,6 @@ class PairDeviceView(BaseAPIView):
             return web.json_response({
                 "success": True,
                 "device_id": result["device_id"],
-                "api_token": result["api_token"],
                 "cert_fingerprint": cert_fingerprint,
                 "config": config_response,
             })
@@ -375,9 +404,8 @@ class DeviceView(BaseAPIView):
 
     async def get(self, request: web.Request, device_id: str) -> web.Response:
         """Get device details."""
-        # Validate token
-        token_device_id = self._validate_api_token(request)
-        if token_device_id != device_id:
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
                 status=401,
@@ -401,9 +429,8 @@ class DeviceView(BaseAPIView):
 
     async def patch(self, request: web.Request, device_id: str) -> web.Response:
         """Update device settings."""
-        # Validate token
-        token_device_id = self._validate_api_token(request)
-        if token_device_id != device_id:
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
                 status=401,
@@ -441,9 +468,8 @@ class DeviceView(BaseAPIView):
 
     async def delete(self, request: web.Request, device_id: str) -> web.Response:
         """Remove/unpair device."""
-        # Validate token (device can remove itself)
-        token_device_id = self._validate_api_token(request)
-        if token_device_id != device_id:
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
                 status=401,
@@ -467,9 +493,8 @@ class DeviceTokenView(BaseAPIView):
 
     async def post(self, request: web.Request, device_id: str) -> web.Response:
         """Update device's FCM token."""
-        # Validate API token
-        token_device_id = self._validate_api_token(request)
-        if token_device_id != device_id:
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
                 status=401,
@@ -517,8 +542,7 @@ class ConfigView(BaseAPIView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Get configuration for mobile app."""
-        # Validate API token
-        device_id = self._validate_api_token(request)
+        device_id = self._resolve_owned_device_id(request)
         if not device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
@@ -529,6 +553,7 @@ class ConfigView(BaseAPIView):
 
         frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
         push_provider = self.entry.data.get(CONF_PUSH_PROVIDER)
+        device = await self.device_manager.async_get_device(device_id)
 
         config_response = {
             "frigate_url": frigate_url,
@@ -537,6 +562,7 @@ class ConfigView(BaseAPIView):
             "fcm_sender_id": self.coordinator.push_provider.get_sender_id(),
             "version": "0.1.0",
             "protocol_version": 2,
+            "remote_ui_url": device.get("mobile_app_remote_ui_url") if device else None,
         }
         firebase_client_config = self.entry.data.get(CONF_FIREBASE_CLIENT_CONFIG)
         if firebase_client_config:
@@ -569,7 +595,7 @@ class StatusView(BaseAPIView):
         details are only included when a valid API token is presented, to avoid
         leaking configuration info to unauthenticated callers.
         """
-        device_id = self._validate_api_token(request)
+        device_id = self._resolve_owned_device_id(request)
         base: dict = {
             "status": "ok",
             "version": "0.1.0",
@@ -593,8 +619,7 @@ class TestNotificationView(BaseAPIView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Send a test notification."""
-        # Validate API token
-        device_id = self._validate_api_token(request)
+        device_id = self._resolve_owned_device_id(request)
         if not device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
@@ -629,8 +654,7 @@ class WebRTCCredentialsView(BaseAPIView):
         This endpoint provides credentials for the Nabu Casa WebRTC relay
         if the user has Home Assistant Cloud configured.
         """
-        # Validate API token
-        device_id = self._validate_api_token(request)
+        device_id = self._resolve_owned_device_id(request)
         if not device_id:
             return web.json_response(
                 {"error": "Unauthorized"},
@@ -747,7 +771,7 @@ class FrigateProxyView(BaseAPIView):
         method: str,
     ) -> web.Response:
         """Proxy a request to the Frigate API."""
-        device_id = self._validate_api_token(request)
+        device_id = self._resolve_owned_device_id(request)
         if not device_id:
             return web.json_response({"error": "Unauthorized"}, status=401)
 
@@ -846,9 +870,8 @@ class FrigateCredentialsView(BaseAPIView):
 
     async def post(self, request: web.Request, device_id: str) -> web.Response:
         """Store Frigate credentials for a device."""
-        # Validate API token (device can only set its own credentials)
-        token_device_id = self._validate_api_token(request)
-        if token_device_id != device_id:
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
             return web.json_response({"error": "Unauthorized"}, status=401)
 
         try:

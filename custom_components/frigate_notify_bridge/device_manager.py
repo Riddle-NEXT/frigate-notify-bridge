@@ -158,6 +158,7 @@ class DeviceManager:
         self,
         token_or_code: str,
         device_info: dict[str, Any],
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         """Complete device pairing.
 
@@ -170,7 +171,7 @@ class DeviceManager:
                 - app_version: App version string
 
         Returns:
-            Device registration data including device_id and API token
+            Device registration data including device_id and optional API token
 
         Raises:
             ValueError: If token is invalid or expired
@@ -179,9 +180,11 @@ class DeviceManager:
         if pairing_data is None:
             raise ValueError("Invalid or expired pairing token")
 
-        # Generate device ID and API token
-        device_id = secrets.token_urlsafe(16)
-        api_token = secrets.token_urlsafe(32)
+        # In the HA-native flow, the app provides its stable mobile_app
+        # device_id and authenticates as the signed-in HA user. Keep the
+        # legacy bridge-issued API token path for backwards compatibility.
+        device_id = device_info.get("mobile_app_device_id") or secrets.token_urlsafe(16)
+        api_token = None if user_id else secrets.token_urlsafe(32)
 
         # Create device record
         device = {
@@ -191,6 +194,12 @@ class DeviceManager:
             "fcm_token": device_info.get("fcm_token"),
             "app_version": device_info.get("app_version"),
             "api_token": api_token,
+            "ha_user_id": user_id,
+            "mobile_app_device_id": device_info.get("mobile_app_device_id"),
+            "mobile_app_webhook_id": device_info.get("mobile_app_webhook_id"),
+            "mobile_app_secret": device_info.get("mobile_app_secret"),
+            "mobile_app_cloudhook_url": device_info.get("mobile_app_cloudhook_url"),
+            "mobile_app_remote_ui_url": device_info.get("mobile_app_remote_ui_url"),
             "paired_at": datetime.utcnow().isoformat(),
             "last_seen": datetime.utcnow().isoformat(),
             "notification_settings": {
@@ -239,10 +248,10 @@ class DeviceManager:
 
         _LOGGER.info("Device paired: %s (%s)", device["name"], device_id)
 
-        return {
-            "device_id": device_id,
-            "api_token": api_token,
-        }
+        result = {"device_id": device_id}
+        if api_token:
+            result["api_token"] = api_token
+        return result
 
     async def async_remove_device(self, device_id: str) -> bool:
         """Remove a paired device."""
@@ -329,6 +338,13 @@ class DeviceManager:
             if device.get("api_token") == api_token:
                 return device_id
         return None
+
+    def user_owns_device(self, user_id: str, device_id: str) -> bool:
+        """Return whether the HA user owns the paired bridge device."""
+        device = self._devices.get(device_id)
+        if not device:
+            return False
+        return device.get("ha_user_id") == user_id
 
     async def async_get_devices_for_notification(
         self,
