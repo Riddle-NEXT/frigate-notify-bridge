@@ -17,6 +17,7 @@ from .const import (
     DOMAIN,
     API_BASE_PATH,
     API_FRIGATE_PROXY_PATH,
+    API_MEDIA_PROXY_PATH,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
     CONF_FRIGATE_PASSWORD,
@@ -59,6 +60,7 @@ async def async_setup_api(
     hass.http.register_view(TestNotificationView(entry, coordinator, device_manager))
     hass.http.register_view(WebRTCCredentialsView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateProxyView(entry, coordinator, device_manager))
+    hass.http.register_view(FrigateMediaView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateCredentialsView(entry, coordinator, device_manager))
 
     _LOGGER.info("Frigate Notify Bridge API endpoints registered")
@@ -860,6 +862,129 @@ class FrigateProxyView(BaseAPIView):
     async def patch(self, request: web.Request, path: str = "") -> web.Response:
         """Handle PATCH."""
         return await self._proxy_request(request, "PATCH")
+
+
+class FrigateMediaView(BaseAPIView):
+    """Serve signed media URLs for notification attachments."""
+
+    requires_auth = False
+    url = f"{API_MEDIA_PROXY_PATH}/{{media_kind}}/{{media_id}}"
+    name = "api:frigate_notify_bridge:frigate_media_proxy"
+
+    async def _get_frigate_token(
+        self,
+        session: aiohttp.ClientSession,
+        frigate_url: str,
+        device_id: str,
+    ) -> str | None:
+        """Get or refresh a Frigate JWT for the given device."""
+        cached = FrigateProxyView._frigate_tokens.get(device_id)
+        if cached:
+            return cached
+
+        username, password = self.device_manager.get_frigate_credentials(device_id)
+        if not username:
+            username = self.entry.data.get(CONF_FRIGATE_USERNAME)
+            password = self.entry.data.get(CONF_FRIGATE_PASSWORD)
+
+        if not username or not password:
+            return None
+
+        try:
+            async with session.post(
+                f"{frigate_url}/api/login",
+                json={"user": username, "password": password},
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    token = data.get("access_token")
+                    if token:
+                        FrigateProxyView._frigate_tokens[device_id] = token
+                        return token
+        except Exception as err:
+            _LOGGER.error("Frigate media login error for device %s: %s", device_id, err)
+
+        return None
+
+    def _build_target_url(self, media_kind: str, media_id: str) -> str | None:
+        """Translate a signed media path into the upstream Frigate URL."""
+        frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
+        if not frigate_url:
+            return None
+
+        if media_kind == "event_thumbnail":
+            return f"{frigate_url}/api/events/{media_id}/thumbnail.jpg"
+        if media_kind == "event_snapshot":
+            return f"{frigate_url}/api/events/{media_id}/snapshot.jpg"
+        if media_kind == "review_gif":
+            return f"{frigate_url}/api/review/{media_id}/preview?format=gif"
+        if media_kind == "review_mp4":
+            return f"{frigate_url}/api/review/{media_id}/preview?format=mp4"
+        return None
+
+    async def get(
+        self,
+        request: web.Request,
+        media_kind: str,
+        media_id: str,
+    ) -> web.Response:
+        """Serve a signed notification media URL."""
+        device_id = request.query.get("device_id", "").strip()
+        signature = request.query.get("sig", "").strip()
+        expires_raw = request.query.get("expires", "").strip()
+        try:
+            expires = int(expires_raw)
+        except (TypeError, ValueError):
+            return web.json_response({"error": "Invalid expiration"}, status=400)
+
+        if not device_id or not signature:
+            return web.json_response({"error": "Missing signature"}, status=401)
+
+        if not self.device_manager.validate_media_signature(
+            device_id=device_id,
+            media_kind=media_kind,
+            media_id=media_id,
+            expires=expires,
+            signature=signature,
+        ):
+            return web.json_response({"error": "Invalid signature"}, status=401)
+
+        target_url = self._build_target_url(media_kind, media_id)
+        if not target_url:
+            return web.json_response({"error": "Unsupported media"}, status=404)
+
+        session = async_get_clientsession(request.app["hass"])
+        headers: dict[str, str] = {}
+        frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
+        if frigate_url:
+            token = await self._get_frigate_token(session, frigate_url, device_id)
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            async with session.get(target_url, headers=headers, timeout=20) as resp:
+                if resp.status == 401 and device_id in FrigateProxyView._frigate_tokens:
+                    FrigateProxyView._frigate_tokens.pop(device_id, None)
+                    token = await self._get_frigate_token(session, frigate_url, device_id)
+                    if token:
+                        headers["Authorization"] = f"Bearer {token}"
+                        async with session.get(target_url, headers=headers, timeout=20) as retry:
+                            retry_body = await retry.read()
+                            return web.Response(
+                                status=retry.status,
+                                body=retry_body,
+                                content_type=retry.content_type,
+                            )
+
+                body = await resp.read()
+                return web.Response(
+                    status=resp.status,
+                    body=body,
+                    content_type=resp.content_type,
+                )
+        except Exception as err:
+            _LOGGER.error("Frigate media proxy error: %s", err)
+            return web.json_response({"error": "Media proxy failed"}, status=502)
 
 
 class FrigateCredentialsView(BaseAPIView):

@@ -48,6 +48,7 @@ from .const import (
     PUSH_PROVIDER_RELAY,
     PUSH_PROVIDER_NTFY,
     PUSH_PROVIDER_PUSHOVER,
+    SIGNAL_DEVICE_UPDATED,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -485,10 +486,35 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
     def __init__(self) -> None:
         """Initialize options flow state."""
         self._active_pairing_info: dict[str, Any] | None = None
+        self._selected_device_id: str | None = None
 
     def _merged_options(self, updates: dict[str, Any]) -> dict[str, Any]:
         """Merge option updates without dropping unrelated saved values."""
         return {**self.config_entry.options, **updates}
+
+    @staticmethod
+    def _csv_string(values: list[str] | None) -> str:
+        """Serialize a list of strings for a simple text field."""
+        if not values:
+            return ""
+        return ", ".join(values)
+
+    @staticmethod
+    def _parse_csv_list(value: Any) -> list[str]:
+        """Parse a comma-separated text field into a normalized string list."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            raw_values = value
+        else:
+            raw_values = str(value).split(",")
+
+        normalized: list[str] = []
+        for item in raw_values:
+            text = str(item).strip()
+            if text:
+                normalized.append(text)
+        return sorted(set(normalized))
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -499,6 +525,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             menu_options={
                 "connection_settings": "Connection Settings",
                 "notification_settings": "Notification Settings",
+                "device_notification_settings_select": "Device Notification Rules",
                 "diagnostics": "Diagnostics",
                 "device_management": "Manage Devices",
                 "add_device": "Add Device",
@@ -596,6 +623,209 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     ): selector.BooleanSelector(),
                 }
             ),
+        )
+
+    async def async_step_device_notification_settings_select(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Choose which paired device to edit notification rules for."""
+        data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        device_manager = data.get("device_manager")
+
+        if device_manager is None:
+            return self.async_abort(reason="not_configured")
+
+        devices = await device_manager.async_get_devices()
+        if not devices:
+            return self.async_abort(reason="no_devices")
+
+        if user_input is not None:
+            self._selected_device_id = user_input.get("device_id")
+            return await self.async_step_device_notification_settings()
+
+        device_options = [
+            selector.SelectOptionDict(
+                value=device_id,
+                label=f"{device['name']} ({device.get('platform', 'Unknown')})",
+            )
+            for device_id, device in sorted(
+                devices.items(), key=lambda item: item[1].get("name", item[0]).lower()
+            )
+        ]
+
+        return self.async_show_form(
+            step_id="device_notification_settings_select",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=device_options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_device_notification_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Edit per-device notification rules."""
+        data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        device_manager = data.get("device_manager")
+
+        if device_manager is None:
+            return self.async_abort(reason="not_configured")
+
+        if not self._selected_device_id:
+            return await self.async_step_device_notification_settings_select()
+
+        device = await device_manager.async_get_device(self._selected_device_id)
+        if not device:
+            self._selected_device_id = None
+            return self.async_abort(reason="no_devices")
+
+        settings = device_manager.normalize_notification_settings(
+            device.get("notification_settings")
+        )
+
+        if user_input is not None:
+            updates = {
+                "notification_settings": {
+                    "enabled": user_input.get("enabled", True),
+                    "event_kinds": user_input.get("event_kinds", ["alert"]),
+                    "cameras": self._parse_csv_list(user_input.get("cameras")),
+                    "labels": self._parse_csv_list(user_input.get("labels")),
+                    "zones": self._parse_csv_list(user_input.get("zones")),
+                    "min_confidence": user_input.get("min_confidence", 0),
+                    "cooldown_seconds": user_input.get("cooldown_seconds", 60),
+                    "quiet_hours_start": user_input.get("quiet_hours_start"),
+                    "quiet_hours_end": user_input.get("quiet_hours_end"),
+                    "include_thumbnail": user_input.get("include_thumbnail", True),
+                    "include_snapshot": user_input.get("include_snapshot", False),
+                    "include_actions": user_input.get("include_actions", True),
+                    "include_gif_preview": user_input.get("include_gif_preview", False),
+                }
+            }
+
+            await device_manager.async_update_device(self._selected_device_id, updates)
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_DEVICE_UPDATED,
+                self._selected_device_id,
+            )
+            self._selected_device_id = None
+            return self.async_create_entry(
+                title="",
+                data=dict(self.config_entry.options),
+            )
+
+        return self.async_show_form(
+            step_id="device_notification_settings",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "enabled",
+                        default=settings.get("enabled", True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        "event_kinds",
+                        default=settings.get("event_kinds", ["alert"]),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(
+                                    value="alert",
+                                    label="Alerts",
+                                ),
+                                selector.SelectOptionDict(
+                                    value="detection",
+                                    label="Detections",
+                                ),
+                                selector.SelectOptionDict(
+                                    value="event",
+                                    label="Legacy events",
+                                ),
+                            ],
+                            multiple=True,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    ),
+                    vol.Optional(
+                        "cameras",
+                        default=self._csv_string(settings.get("cameras")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "labels",
+                        default=self._csv_string(settings.get("labels")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "zones",
+                        default=self._csv_string(settings.get("zones")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "min_confidence",
+                        default=settings.get("min_confidence", 0),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            mode=selector.NumberSelectorMode.SLIDER,
+                        )
+                    ),
+                    vol.Optional(
+                        "cooldown_seconds",
+                        default=settings.get("cooldown_seconds", 60),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=3600,
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        "quiet_hours_start",
+                        default=settings.get("quiet_hours_start"),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=23,
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        "quiet_hours_end",
+                        default=settings.get("quiet_hours_end"),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=23,
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional(
+                        "include_thumbnail",
+                        default=settings.get("include_thumbnail", True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        "include_snapshot",
+                        default=settings.get("include_snapshot", False),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        "include_actions",
+                        default=settings.get("include_actions", True),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        "include_gif_preview",
+                        default=settings.get("include_gif_preview", False),
+                    ): selector.BooleanSelector(),
+                }
+            ),
+            description_placeholders={
+                "device_name": device.get("name", self._selected_device_id),
+            },
         )
 
     async def async_step_diagnostics(

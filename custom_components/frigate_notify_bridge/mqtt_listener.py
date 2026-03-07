@@ -3,13 +3,12 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable
 
 from homeassistant.components import mqtt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     CONF_MQTT_TOPIC_PREFIX,
@@ -46,7 +45,6 @@ class FrigateMQTTListener:
             CONF_MQTT_TOPIC_PREFIX, DEFAULT_MQTT_TOPIC_PREFIX
         )
         self._external_client = None
-        self._last_events: dict[str, datetime] = {}  # For cooldown tracking
         self._cleanup_unsub = None
 
     async def async_start(self) -> None:
@@ -55,13 +53,6 @@ class FrigateMQTTListener:
             await self._subscribe_ha_mqtt()
         else:
             await self._start_external_mqtt()
-
-        # Schedule periodic cleanup of old events
-        self._cleanup_unsub = async_track_time_interval(
-            self.hass,
-            self._cleanup_old_events,
-            timedelta(minutes=5),
-        )
 
         _LOGGER.info("MQTT listener started (prefix: %s)", self._topic_prefix)
 
@@ -75,11 +66,6 @@ class FrigateMQTTListener:
         # Stop external client if used
         if self._external_client:
             await self._stop_external_mqtt()
-
-        # Cancel cleanup task
-        if self._cleanup_unsub:
-            self._cleanup_unsub()
-            self._cleanup_unsub = None
 
         _LOGGER.info("MQTT listener stopped")
 
@@ -228,18 +214,14 @@ class FrigateMQTTListener:
                 if not new_zones:
                     return
 
-            # Check cooldown
-            cooldown_key = f"{camera}:{label}"
-            if not self._check_cooldown(cooldown_key):
-                _LOGGER.debug("Skipping notification due to cooldown: %s", cooldown_key)
-                return
-
             # Build notification data
             notification_data = {
                 "event_id": event_id,
+                "event_kind": "event",
                 "event_type": event_type,
                 "camera": camera,
                 "label": label,
+                "objects": [label] if label else [],
                 "sub_label": event_data.get("sub_label"),
                 "zones": zones,
                 "score": score,
@@ -267,42 +249,48 @@ class FrigateMQTTListener:
             data = json.loads(payload)
             _LOGGER.debug("Received review: %s", data)
 
-            # Reviews are aggregated events - we might want to handle these differently
-            # For now, we'll skip reviews and rely on events
-            # Future enhancement: use reviews for summarized notifications
+            event_type = data.get("type")
+            before = data.get("before", {})
+            after = data.get("after", {})
+            review_data = after if after else before
+            if not review_data:
+                return
+
+            severity = str(review_data.get("severity", "")).strip().lower()
+            if severity not in {"alert", "detection"}:
+                _LOGGER.debug("Skipping review with unsupported severity: %s", severity)
+                return
+
+            review_id = review_data.get("id")
+            payload_data = review_data.get("data", {}) or {}
+            objects = payload_data.get("objects", []) or []
+            sub_labels = payload_data.get("sub_labels", []) or []
+            zones = payload_data.get("zones", []) or []
+            detections = payload_data.get("detections", []) or []
+            camera = review_data.get("camera")
+            label = objects[0] if objects else (review_data.get("label") or "object")
+
+            notification_data = {
+                "review_id": review_id,
+                "event_kind": severity,
+                "event_type": event_type,
+                "camera": camera,
+                "label": label,
+                "objects": objects,
+                "sub_label": ", ".join(str(item) for item in sub_labels if item) or None,
+                "zones": zones,
+                "event_ids": detections,
+                "score": None,
+                "has_clip": True,
+                "has_snapshot": True,
+                "start_time": review_data.get("start_time"),
+                "end_time": review_data.get("end_time"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+            await self.coordinator.async_handle_event(notification_data)
 
         except json.JSONDecodeError as e:
             _LOGGER.error("Failed to parse review payload: %s", e)
         except Exception as e:
             _LOGGER.exception("Error processing review: %s", e)
-
-    def _check_cooldown(self, key: str, cooldown_seconds: int = 60) -> bool:
-        """Check if we're within the cooldown period for a key.
-
-        Returns True if we should send the notification, False if in cooldown.
-        """
-        now = datetime.utcnow()
-        last_time = self._last_events.get(key)
-
-        if last_time and (now - last_time).total_seconds() < cooldown_seconds:
-            return False
-
-        self._last_events[key] = now
-        return True
-
-    @callback
-    def _cleanup_old_events(self, _: datetime) -> None:
-        """Clean up old event timestamps."""
-        now = datetime.utcnow()
-        cutoff = now - timedelta(minutes=10)
-
-        keys_to_remove = [
-            key for key, timestamp in self._last_events.items()
-            if timestamp < cutoff
-        ]
-
-        for key in keys_to_remove:
-            del self._last_events[key]
-
-        if keys_to_remove:
-            _LOGGER.debug("Cleaned up %d old event entries", len(keys_to_remove))

@@ -125,6 +125,7 @@ API_CONFIG_PATH: Final = f"{API_BASE_PATH}/config"
 API_STATUS_PATH: Final = f"{API_BASE_PATH}/status"
 API_QR_PATH: Final = f"{API_BASE_PATH}/pairing/qr"
 API_FRIGATE_PROXY_PATH: Final = f"{API_BASE_PATH}/frigate"
+API_MEDIA_PROXY_PATH: Final = f"{API_BASE_PATH}/media"
 
 # MQTT Topics
 MQTT_EVENTS_TOPIC: Final = "events"
