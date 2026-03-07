@@ -161,6 +161,10 @@ class FrigateNotifyCoordinator:
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
         has_snapshot = event_data.get("has_snapshot", False)
+        has_clip = event_data.get("has_clip", False)
+        start_time = event_data.get("start_time")
+        end_time = event_data.get("end_time")
+        sub_label = event_data.get("sub_label")
 
         # Build title
         title = f"{label.title()} detected"
@@ -195,14 +199,33 @@ class FrigateNotifyCoordinator:
             "camera": camera,
             "label": label,
             "score": str(score),
+            "has_clip": str(bool(has_clip)).lower(),
+            "has_snapshot": str(bool(has_snapshot)).lower(),
             "timestamp": event_data.get("timestamp", datetime.utcnow().isoformat()),
         }
+
+        if sub_label:
+            data["sub_label"] = str(sub_label)
 
         if zones:
             data["zones"] = ",".join(zones)
 
         if self._frigate_url:
             data["frigate_url"] = self._frigate_url
+        if thumbnail_url:
+            data["thumbnail_url"] = thumbnail_url
+        if image_url:
+            data["image_url"] = image_url
+        if start_time is not None:
+            data["start_time"] = str(start_time)
+        if end_time is not None:
+            data["end_time"] = str(end_time)
+        if event_id:
+            data["deep_link_event"] = f"/events/{event_id}"
+        if camera:
+            data["deep_link_camera"] = f"/live/{camera}"
+            if start_time is not None:
+                data["deep_link_recording"] = f"/recordings/{camera}/{int(float(start_time))}"
 
         return NotificationPayload(
             title=title,
@@ -273,7 +296,10 @@ class FrigateNotifyCoordinator:
         payload = NotificationPayload(
             title="Test Notification",
             body="This is a test from Frigate Notify Bridge",
-            data={"type": "test"},
+            data={
+                "type": "test",
+                "timestamp": datetime.utcnow().isoformat(),
+            },
             priority="normal",
         )
 
