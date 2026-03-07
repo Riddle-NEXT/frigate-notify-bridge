@@ -4,12 +4,15 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
+from urllib.parse import urlencode
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    API_MEDIA_PROXY_PATH,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
     CONF_FRIGATE_PASSWORD,
@@ -48,6 +51,7 @@ class FrigateNotifyCoordinator:
         self.device_manager = device_manager
         self._frigate_url = entry.data.get(CONF_FRIGATE_URL)
         self._frigate_auth: tuple[str, str] | None = None
+        self._frigate_api_token: str | None = None
 
         # Set up Frigate auth if configured
         username = entry.data.get(CONF_FRIGATE_USERNAME)
@@ -70,57 +74,63 @@ class FrigateNotifyCoordinator:
                 - has_snapshot: Whether snapshot is available
         """
         event_id = event_data.get("event_id")
+        review_id = event_data.get("review_id")
         camera = event_data.get("camera")
         label = event_data.get("label")
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
+        event_kind = str(event_data.get("event_kind", "event")).lower()
 
         _LOGGER.debug(
-            "Processing event: %s (camera=%s, label=%s)",
+            "Processing %s notification: event=%s review=%s camera=%s label=%s",
+            event_kind,
             event_id,
+            review_id,
             camera,
             label,
         )
 
         # Get devices that should receive this notification
         devices = await self.device_manager.async_get_devices_for_notification(
+            kind=event_kind,
             camera=camera,
             label=label,
-            zone=zones[0] if zones else None,
+            zones=zones,
+            confidence=score,
+            cooldown_key=f"{event_kind}:{review_id or event_id or camera}:{label or ''}",
         )
 
         if not devices:
             _LOGGER.debug("No devices to notify for event %s", event_id)
             return
 
-        # Build notification payload
-        payload = await self._build_notification_payload(event_data)
-
         # Relay registrations are stored under the bridge device ID unless the
         # relay assigns a dedicated relay_device_id later.
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
-        device_tokens = []
-        notified_devices = []
+        results: list[SendResult] = []
+        notified_devices: list[dict[str, Any]] = []
+
         for device in devices:
             token = _device_target(device, use_relay)
-            if token:
-                device_tokens.append(token)
-                notified_devices.append(device)
-        if not device_tokens:
-            _LOGGER.debug("No device tokens available for notification")
+            if not token:
+                continue
+            payload = await self._build_notification_payload(event_data, device)
+            _LOGGER.info(
+                "Sending %s notification to device %s for event=%s review=%s",
+                event_kind,
+                device["id"],
+                event_id,
+                review_id,
+            )
+            result = await self.push_provider.async_send(token, payload)
+            results.append(result)
+            notified_devices.append(device)
+
+        if not results:
+            _LOGGER.debug("No device targets available for notification")
             return
-
-        # Send notifications
-        _LOGGER.info(
-            "Sending notification to %d devices for event %s (relay=%s)",
-            len(device_tokens),
-            event_id,
-            use_relay,
-        )
-
-        results = await self.push_provider.async_send_to_many(device_tokens, payload)
 
         # Increment alert counts for successful sends
         for device, result in zip(notified_devices, results):
@@ -153,11 +163,14 @@ class FrigateNotifyCoordinator:
     async def _build_notification_payload(
         self,
         event_data: dict[str, Any],
+        device: dict[str, Any],
     ) -> NotificationPayload:
         """Build notification payload from event data."""
         event_id = event_data.get("event_id")
+        review_id = event_data.get("review_id")
         camera = event_data.get("camera", "Unknown")
         label = event_data.get("label", "object")
+        objects = event_data.get("objects", [])
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
         has_snapshot = event_data.get("has_snapshot", False)
@@ -165,37 +178,70 @@ class FrigateNotifyCoordinator:
         start_time = event_data.get("start_time")
         end_time = event_data.get("end_time")
         sub_label = event_data.get("sub_label")
+        event_kind = str(event_data.get("event_kind", "event")).lower()
+        settings = device.get("notification_settings", {})
+        event_ids = event_data.get("event_ids", [])
+
+        primary_event_id = event_id or (event_ids[0] if event_ids else None)
+        if primary_event_id:
+            details = await self._async_get_event_details(primary_event_id)
+            if details:
+                score = details.get("score", score)
+                has_snapshot = details.get("has_snapshot", has_snapshot)
+                has_clip = details.get("has_clip", has_clip)
+                start_time = details.get("start_time", start_time)
+                end_time = details.get("end_time", end_time)
+                sub_label = details.get("sub_label", sub_label)
+                if not label or label == "object":
+                    label = details.get("label", label)
+                if not zones:
+                    zones = details.get("current_zones", []) or details.get("entered_zones", []) or zones
 
         # Build title
-        title = f"{label.title()} detected"
-        if camera:
-            title = f"{label.title()} on {camera}"
+        display_label = label
+        if objects:
+            display_label = ", ".join(str(obj).title() for obj in objects[:2])
+            if len(objects) > 2:
+                display_label = f"{display_label}, +{len(objects) - 2}"
+        title = f"{display_label.title()} on {camera}" if camera else f"{display_label.title()} detected"
+        if event_kind == "alert":
+            title = f"{display_label.title()} alert on {camera}" if camera else f"{display_label.title()} alert"
+        elif event_kind == "detection":
+            title = f"{display_label.title()} on {camera}" if camera else f"{display_label.title()} detected"
 
         # Build body
         body_parts = []
         if score:
-            body_parts.append(f"Confidence: {int(score * 100)}%")
+            score_percent = int(float(score) * 100) if float(score) <= 1 else int(float(score))
+            body_parts.append(f"Confidence: {score_percent}%")
         if zones:
             body_parts.append(f"Zone: {', '.join(zones)}")
+        if sub_label:
+            body_parts.append(str(sub_label))
+        if event_kind in {"alert", "detection"}:
+            body_parts.insert(0, event_kind.title())
 
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
         # Build image URLs
         thumbnail_url = None
         image_url = None
+        gif_url = None
 
-        if self._frigate_url and event_id:
-            # Thumbnail URL (small, fast)
-            thumbnail_url = f"{self._frigate_url}/api/events/{event_id}/thumbnail.jpg"
-
-            # Snapshot URL (full size)
-            if has_snapshot:
-                image_url = f"{self._frigate_url}/api/events/{event_id}/snapshot.jpg"
+        if primary_event_id and settings.get("include_thumbnail", True):
+            thumbnail_url = self._build_media_url(device, "event_thumbnail", primary_event_id)
+        if primary_event_id and has_snapshot and settings.get("include_snapshot", False):
+            image_url = self._build_media_url(device, "event_snapshot", primary_event_id)
+        if review_id and settings.get("include_gif_preview", False):
+            gif_url = self._build_media_url(device, "review_gif", review_id)
+        preferred_image_url = gif_url or image_url or thumbnail_url
 
         # Build data payload for the app
         data = {
             "type": "frigate_event",
-            "event_id": event_id,
+            "event_kind": event_kind,
+            "event_id": primary_event_id,
+            "review_id": review_id,
             "camera": camera,
             "label": label,
             "score": str(score),
@@ -216,12 +262,14 @@ class FrigateNotifyCoordinator:
             data["thumbnail_url"] = thumbnail_url
         if image_url:
             data["image_url"] = image_url
+        if gif_url:
+            data["gif_url"] = gif_url
         if start_time is not None:
             data["start_time"] = str(start_time)
         if end_time is not None:
             data["end_time"] = str(end_time)
-        if event_id:
-            data["deep_link_event"] = f"/events/{event_id}"
+        if primary_event_id:
+            data["deep_link_event"] = f"/events/{primary_event_id}"
         if camera:
             data["deep_link_camera"] = f"/live/{camera}"
             if start_time is not None:
@@ -231,14 +279,97 @@ class FrigateNotifyCoordinator:
             title=title,
             body=body,
             data=data,
-            image_url=image_url,
+            image_url=preferred_image_url,
             thumbnail_url=thumbnail_url,
             priority="high",
-            event_id=event_id,
+            event_id=primary_event_id,
             camera=camera,
             label=label,
             zones=zones,
         )
+
+    def _build_media_url(
+        self,
+        device: dict[str, Any],
+        media_kind: str,
+        media_id: str,
+    ) -> str | None:
+        """Build a signed absolute media proxy URL for a device."""
+        base_url = (
+            device.get("mobile_app_remote_ui_url")
+            or self.entry.options.get("external_url")
+            or self._frigate_url
+        )
+        device_id = device.get("id")
+        if not base_url or not device_id:
+            return None
+
+        expires = int(datetime.utcnow().timestamp()) + 10 * 60
+        signature = self.device_manager.create_media_signature(
+            device_id=device_id,
+            media_kind=media_kind,
+            media_id=media_id,
+            expires=expires,
+        )
+        if not signature:
+            return None
+
+        query = urlencode({
+            "device_id": device_id,
+            "expires": expires,
+            "sig": signature,
+        })
+        return f"{base_url.rstrip('/')}{API_MEDIA_PROXY_PATH}/{media_kind}/{media_id}?{query}"
+
+    async def _async_get_frigate_access_token(self) -> str | None:
+        """Get or refresh a Frigate API token using integration credentials."""
+        if self._frigate_api_token:
+            return self._frigate_api_token
+        if not self._frigate_url or not self._frigate_auth:
+            return None
+
+        session = async_get_clientsession(self.hass)
+        username, password = self._frigate_auth
+        try:
+            async with session.post(
+                f"{self._frigate_url}/api/login",
+                json={"user": username, "password": password},
+                timeout=10,
+                ssl=False,
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    self._frigate_api_token = data.get("access_token")
+                    return self._frigate_api_token
+        except aiohttp.ClientError as err:
+            _LOGGER.warning("Failed to authenticate to Frigate API: %s", err)
+        return None
+
+    async def _async_get_event_details(self, event_id: str) -> dict[str, Any] | None:
+        """Fetch full event details from Frigate when needed."""
+        if not self._frigate_url or not event_id:
+            return None
+
+        session = async_get_clientsession(self.hass)
+        headers: dict[str, str] = {}
+        token = await self._async_get_frigate_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            async with session.get(
+                f"{self._frigate_url}/api/events/{event_id}",
+                headers=headers,
+                timeout=10,
+                ssl=False,
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status == 401 and token:
+                    self._frigate_api_token = None
+        except aiohttp.ClientError as err:
+            _LOGGER.debug("Unable to fetch Frigate event details for %s: %s", event_id, err)
+        return None
 
     async def async_get_frigate_thumbnail(
         self,

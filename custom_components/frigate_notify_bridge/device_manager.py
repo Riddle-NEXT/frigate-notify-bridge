@@ -1,6 +1,8 @@
 """Device manager for Frigate Notify Bridge."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets
 from datetime import datetime, timedelta
@@ -23,6 +25,24 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
+    "enabled": True,
+    "event_kinds": ["alert"],
+    "cameras": [],
+    "labels": [],
+    "zones": [],
+    "min_confidence": 0,
+    "cooldown_seconds": 60,
+    "quiet_hours_start": None,
+    "quiet_hours_end": None,
+    "include_thumbnail": True,
+    "include_snapshot": False,
+    "include_actions": True,
+    "include_gif_preview": False,
+}
+
+ALLOWED_EVENT_KINDS = {"alert", "detection", "event"}
+
 
 class DeviceManager:
     """Manage paired mobile devices."""
@@ -38,6 +58,12 @@ class DeviceManager:
         self._store = store
         self._devices: dict[str, dict[str, Any]] = initial_devices or {}
         self._pending_pairings: dict[str, dict[str, Any]] = {}
+        self._cooldowns: dict[str, datetime] = {}
+
+        for device in self._devices.values():
+            device["notification_settings"] = self.normalize_notification_settings(
+                device.get("notification_settings")
+            )
 
     async def async_save(self) -> None:
         """Save devices to storage."""
@@ -55,6 +81,119 @@ class DeviceManager:
     async def async_get_device(self, device_id: str) -> dict[str, Any] | None:
         """Get a specific device."""
         return self._devices.get(device_id)
+
+    @classmethod
+    def normalize_notification_settings(
+        cls,
+        settings: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Normalize persisted notification settings."""
+        merged = dict(DEFAULT_NOTIFICATION_SETTINGS)
+        if settings:
+            merged.update(settings)
+
+        event_kinds = [
+            str(kind).strip().lower()
+            for kind in merged.get("event_kinds", [])
+            if str(kind).strip().lower() in ALLOWED_EVENT_KINDS
+        ]
+        if not event_kinds:
+            event_kinds = list(DEFAULT_NOTIFICATION_SETTINGS["event_kinds"])
+
+        def _string_list(key: str) -> list[str]:
+            values = merged.get(key, [])
+            if not isinstance(values, list):
+                return []
+            result: list[str] = []
+            for value in values:
+                normalized = str(value).strip()
+                if normalized:
+                    result.append(normalized)
+            return sorted(set(result))
+
+        def _hour_or_none(key: str) -> int | None:
+            value = merged.get(key)
+            if value in (None, "", False):
+                return None
+            try:
+                hour = int(value)
+            except (TypeError, ValueError):
+                return None
+            return hour if 0 <= hour <= 23 else None
+
+        try:
+            min_confidence = int(float(merged.get("min_confidence", 0)))
+        except (TypeError, ValueError):
+            min_confidence = 0
+        min_confidence = max(0, min(100, min_confidence))
+
+        try:
+            cooldown_seconds = int(float(merged.get("cooldown_seconds", 60)))
+        except (TypeError, ValueError):
+            cooldown_seconds = 60
+        cooldown_seconds = max(0, min(24 * 3600, cooldown_seconds))
+
+        return {
+            "enabled": bool(merged.get("enabled", True)),
+            "event_kinds": event_kinds,
+            "cameras": _string_list("cameras"),
+            "labels": _string_list("labels"),
+            "zones": _string_list("zones"),
+            "min_confidence": min_confidence,
+            "cooldown_seconds": cooldown_seconds,
+            "quiet_hours_start": _hour_or_none("quiet_hours_start"),
+            "quiet_hours_end": _hour_or_none("quiet_hours_end"),
+            "include_thumbnail": bool(merged.get("include_thumbnail", True)),
+            "include_snapshot": bool(merged.get("include_snapshot", False)),
+            "include_actions": bool(merged.get("include_actions", True)),
+            "include_gif_preview": bool(merged.get("include_gif_preview", False)),
+        }
+
+    def _device_media_secret(self, device: dict[str, Any]) -> str | None:
+        """Return the strongest available per-device secret for media URL signing."""
+        return (
+            device.get("mobile_app_secret")
+            or device.get("api_token")
+            or None
+        )
+
+    def create_media_signature(
+        self,
+        device_id: str,
+        media_kind: str,
+        media_id: str,
+        expires: int,
+    ) -> str | None:
+        """Create a short-lived HMAC signature for media proxy access."""
+        device = self._devices.get(device_id)
+        if not device:
+            return None
+        secret = self._device_media_secret(device)
+        if not secret:
+            return None
+        canonical = "\n".join([device_id, media_kind, media_id, str(expires)])
+        return hmac.new(
+            secret.encode(),
+            canonical.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def validate_media_signature(
+        self,
+        *,
+        device_id: str,
+        media_kind: str,
+        media_id: str,
+        expires: int,
+        signature: str,
+    ) -> bool:
+        """Validate a signed media proxy URL."""
+        if expires < int(datetime.utcnow().timestamp()):
+            return False
+        expected = self.create_media_signature(device_id, media_kind, media_id, expires)
+        if not expected:
+            return False
+        return hmac.compare_digest(expected, signature)
 
     def generate_pairing_code(self) -> dict[str, Any]:
         """Generate a new pairing code and token.
@@ -203,15 +342,7 @@ class DeviceManager:
             "mobile_app_remote_ui_url": device_info.get("mobile_app_remote_ui_url"),
             "paired_at": datetime.utcnow().isoformat(),
             "last_seen": datetime.utcnow().isoformat(),
-            "notification_settings": {
-                "enabled": True,
-                "cameras": [],  # Empty = all cameras
-                "labels": ["person"],
-                "zones": [],
-                "cooldown_seconds": 60,
-                "quiet_hours_start": None,
-                "quiet_hours_end": None,
-            },
+            "notification_settings": self.normalize_notification_settings(None),
             "alert_count_today": 0,
             "alert_count_total": 0,
             "alert_count_date": datetime.utcnow().strftime("%Y-%m-%d"),
@@ -299,7 +430,11 @@ class DeviceManager:
             if key in updates:
                 if key == "notification_settings":
                     # Merge notification settings
-                    device["notification_settings"].update(updates[key])
+                    merged_settings = dict(device.get("notification_settings", {}))
+                    merged_settings.update(updates[key])
+                    device["notification_settings"] = self.normalize_notification_settings(
+                        merged_settings
+                    )
                 else:
                     device[key] = updates[key]
 
@@ -349,18 +484,36 @@ class DeviceManager:
 
     async def async_get_devices_for_notification(
         self,
+        kind: str,
         camera: str | None = None,
         label: str | None = None,
-        zone: str | None = None,
+        zones: list[str] | None = None,
+        confidence: float | int | None = None,
+        cooldown_key: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get devices that should receive a notification based on filters."""
         devices_to_notify = []
+        now = datetime.utcnow()
+        normalized_kind = kind.strip().lower()
+        zone_set = {str(zone) for zone in (zones or []) if str(zone).strip()}
+        confidence_percent = None
+        if confidence is not None:
+            try:
+                confidence_float = float(confidence)
+                confidence_percent = confidence_float * 100 if confidence_float <= 1 else confidence_float
+            except (TypeError, ValueError):
+                confidence_percent = None
 
         for device in self._devices.values():
-            settings = device.get("notification_settings", {})
+            settings = self.normalize_notification_settings(
+                device.get("notification_settings")
+            )
 
             # Check if notifications are enabled
             if not settings.get("enabled", True):
+                continue
+
+            if normalized_kind not in settings.get("event_kinds", []):
                 continue
 
             # Check camera filter
@@ -375,7 +528,14 @@ class DeviceManager:
 
             # Check zone filter
             allowed_zones = settings.get("zones", [])
-            if allowed_zones and zone and zone not in allowed_zones:
+            if allowed_zones:
+                if not zone_set:
+                    continue
+                if not zone_set.intersection(allowed_zones):
+                    continue
+
+            min_confidence = settings.get("min_confidence", 0)
+            if confidence_percent is not None and confidence_percent < min_confidence:
                 continue
 
             # Check quiet hours
@@ -391,6 +551,18 @@ class DeviceManager:
                     # Wrapped range (e.g., 22-7 wraps midnight)
                     if current_hour >= quiet_start or current_hour < quiet_end:
                         continue
+
+            if cooldown_key:
+                device_cooldown_key = f"{device['id']}:{cooldown_key}"
+                last_sent = self._cooldowns.get(device_cooldown_key)
+                cooldown_seconds = settings.get("cooldown_seconds", 60)
+                if (
+                    last_sent
+                    and cooldown_seconds > 0
+                    and (now - last_sent).total_seconds() < cooldown_seconds
+                ):
+                    continue
+                self._cooldowns[device_cooldown_key] = now
 
             devices_to_notify.append(device)
 

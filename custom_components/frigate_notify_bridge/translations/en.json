@@ -79,6 +79,7 @@
         "menu_options": {
           "connection_settings": "Connection Settings",
           "notification_settings": "Notification Settings",
+          "device_notification_settings_select": "Device Notification Rules",
           "diagnostics": "Diagnostics",
           "device_management": "Manage Devices",
           "add_device": "Add Device"
@@ -100,6 +101,32 @@
           "cooldown_seconds": "Cooldown between notifications (seconds)",
           "include_thumbnail": "Include thumbnail in notifications",
           "include_snapshot": "Include full snapshot in notifications"
+        }
+      },
+      "device_notification_settings_select": {
+        "title": "Choose Device",
+        "description": "Select a paired Frigate Mobile device to edit its notification rules.",
+        "data": {
+          "device_id": "Device"
+        }
+      },
+      "device_notification_settings": {
+        "title": "Device Notification Rules",
+        "description": "Configure per-device notification filters and media preferences for {device_name}. Comma-separated camera, label, and zone fields can be left empty to allow all values.",
+        "data": {
+          "enabled": "Enable push notifications",
+          "event_kinds": "Event kinds",
+          "cameras": "Allowed cameras (comma-separated)",
+          "labels": "Allowed labels (comma-separated)",
+          "zones": "Allowed zones (comma-separated)",
+          "min_confidence": "Minimum confidence percentage",
+          "cooldown_seconds": "Cooldown between notifications (seconds)",
+          "quiet_hours_start": "Quiet hours start (0-23)",
+          "quiet_hours_end": "Quiet hours end (0-23)",
+          "include_thumbnail": "Include thumbnail image",
+          "include_snapshot": "Include full snapshot image",
+          "include_actions": "Include notification action buttons",
+          "include_gif_preview": "Include GIF preview when available"
         }
       },
       "diagnostics": {
