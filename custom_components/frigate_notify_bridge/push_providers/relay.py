@@ -104,6 +104,38 @@ class RelayPushProvider(PushProvider):
             "X-Frigate-Signature": signature,
         }
 
+    def _build_notification_data(
+        self,
+        payload: NotificationPayload,
+    ) -> dict[str, str]:
+        """Build compact plaintext routing metadata for OS-visible notifications."""
+        data: dict[str, str] = {
+            "type": str((payload.data or {}).get("type", "frigate_event")),
+        }
+
+        if payload.event_id:
+            data["event_id"] = payload.event_id
+        if payload.camera:
+            data["camera"] = payload.camera
+        if payload.label:
+            data["label"] = payload.label
+        if payload.zones:
+            data["zones"] = ",".join(payload.zones)
+        if payload.image_url:
+            data["image_url"] = payload.image_url
+        if payload.thumbnail_url:
+            data["thumbnail_url"] = payload.thumbnail_url
+
+        for key, value in (payload.data or {}).items():
+            if value is None:
+                continue
+            if isinstance(value, (dict, list)):
+                data[key] = json.dumps(value, separators=(",", ":"))
+            else:
+                data[key] = str(value)
+
+        return data
+
     async def async_send(
         self,
         device_token: str,
@@ -131,8 +163,12 @@ class RelayPushProvider(PushProvider):
             "bridgeId": self._bridge_id,
             "deviceIds": device_tokens,
             "encryptedPayload": encrypted,
-            # title/body intentionally omitted — prevents info leakage through relay.
-            # The relay falls back to generic "Frigate Alert" / "New Frigate event".
+            "title": payload.title,
+            "body": payload.body,
+            "imageUrl": payload.image_url or payload.thumbnail_url,
+            "category": "frigate_event" if payload.event_id else "frigate_general",
+            "threadId": payload.camera or "frigate-mobile",
+            "notificationData": self._build_notification_data(payload),
         }
         body_json = json.dumps(body, separators=(",", ":"))
         path = "/sendNotification"

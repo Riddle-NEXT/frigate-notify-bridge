@@ -240,10 +240,13 @@ class FrigateMQTTListener:
                 "event_type": event_type,
                 "camera": camera,
                 "label": label,
+                "sub_label": event_data.get("sub_label"),
                 "zones": zones,
                 "score": score,
                 "has_clip": has_clip,
                 "has_snapshot": has_snapshot,
+                "start_time": event_data.get("start_time"),
+                "end_time": event_data.get("end_time"),
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
