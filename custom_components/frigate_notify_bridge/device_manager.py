@@ -30,6 +30,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "event_kinds": ["alert"],
     "cameras": [],
     "labels": [],
+    "sub_labels": [],
     "zones": [],
     "min_confidence": 0,
     "cooldown_seconds": 60,
@@ -41,7 +42,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "include_gif_preview": False,
 }
 
-ALLOWED_EVENT_KINDS = {"alert", "detection", "event"}
+ALLOWED_EVENT_KINDS = {"alert", "detection", "recording"}
 
 
 class DeviceManager:
@@ -93,9 +94,13 @@ class DeviceManager:
             merged.update(settings)
 
         event_kinds = [
-            str(kind).strip().lower()
+            ("recording" if str(kind).strip().lower() == "event" else str(kind).strip().lower())
             for kind in merged.get("event_kinds", [])
-            if str(kind).strip().lower() in ALLOWED_EVENT_KINDS
+            if (
+                "recording"
+                if str(kind).strip().lower() == "event"
+                else str(kind).strip().lower()
+            ) in ALLOWED_EVENT_KINDS
         ]
         if not event_kinds:
             event_kinds = list(DEFAULT_NOTIFICATION_SETTINGS["event_kinds"])
@@ -138,6 +143,7 @@ class DeviceManager:
             "event_kinds": event_kinds,
             "cameras": _string_list("cameras"),
             "labels": _string_list("labels"),
+            "sub_labels": _string_list("sub_labels"),
             "zones": _string_list("zones"),
             "min_confidence": min_confidence,
             "cooldown_seconds": cooldown_seconds,
@@ -487,6 +493,7 @@ class DeviceManager:
         kind: str,
         camera: str | None = None,
         label: str | None = None,
+        sub_label: str | None = None,
         zones: list[str] | None = None,
         confidence: float | int | None = None,
         cooldown_key: str | None = None,
@@ -495,6 +502,8 @@ class DeviceManager:
         devices_to_notify = []
         now = datetime.utcnow()
         normalized_kind = kind.strip().lower()
+        if normalized_kind == "event":
+            normalized_kind = "recording"
         zone_set = {str(zone) for zone in (zones or []) if str(zone).strip()}
         confidence_percent = None
         if confidence is not None:
@@ -525,6 +534,12 @@ class DeviceManager:
             allowed_labels = settings.get("labels", [])
             if allowed_labels and label and label not in allowed_labels:
                 continue
+
+            allowed_sub_labels = settings.get("sub_labels", [])
+            if allowed_sub_labels:
+                normalized_sub_label = str(sub_label or "").strip()
+                if not normalized_sub_label or normalized_sub_label not in allowed_sub_labels:
+                    continue
 
             # Check zone filter
             allowed_zones = settings.get("zones", [])

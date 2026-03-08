@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import ssl
 from typing import Any, TYPE_CHECKING
+from urllib.parse import quote
+from http.cookies import SimpleCookie
 
 import aiohttp
 from aiohttp import web
@@ -41,6 +44,80 @@ if TYPE_CHECKING:
     from .device_manager import DeviceManager
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _extract_frigate_token(
+    response: aiohttp.ClientResponse,
+    payload: dict[str, Any] | str | None,
+) -> str | None:
+    """Extract a Frigate JWT from JSON, plain-text bodies, or cookies."""
+    token = payload.get("access_token") if isinstance(payload, dict) else None
+    if token:
+        return str(token)
+
+    if isinstance(payload, str):
+        stripped = payload.strip()
+        if stripped:
+            if stripped.startswith("{"):
+                try:
+                    decoded = json.loads(stripped)
+                except Exception:
+                    decoded = None
+                if isinstance(decoded, dict):
+                    token = decoded.get("access_token")
+                    if token:
+                        return str(token)
+            elif "." in stripped:
+                return stripped
+
+    raw_cookies = response.headers.getall("Set-Cookie", [])
+    for raw_cookie in raw_cookies:
+        cookie = SimpleCookie()
+        try:
+            cookie.load(raw_cookie)
+        except Exception:
+            continue
+        morsel = cookie.get("frigate_token")
+        if morsel and morsel.value:
+            return morsel.value
+
+    return None
+
+
+async def _read_frigate_login_payload(
+    response: aiohttp.ClientResponse,
+) -> dict[str, Any] | str | None:
+    """Read a Frigate login response without assuming a JSON content type."""
+    body = await response.text()
+    if not body:
+        return None
+    stripped = body.strip()
+    if not stripped:
+        return None
+    try:
+        decoded = json.loads(stripped)
+    except Exception:
+        return stripped
+    if isinstance(decoded, dict):
+        return decoded
+    return stripped
+
+
+def _proxy_response_headers(response: aiohttp.ClientResponse) -> dict[str, str]:
+    """Copy safe upstream headers into the Home Assistant proxy response."""
+    excluded = {
+        "content-length",
+        "transfer-encoding",
+        "content-encoding",
+        "connection",
+        "keep-alive",
+    }
+    headers: dict[str, str] = {}
+    for key, value in response.headers.items():
+        if key.lower() in excluded:
+            continue
+        headers[key] = value
+    return headers
 
 
 async def async_setup_api(
@@ -754,8 +831,8 @@ class FrigateProxyView(BaseAPIView):
                 json={"user": username, "password": password},
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    token = data.get("access_token")
+                    data = await _read_frigate_login_payload(resp)
+                    token = _extract_frigate_token(resp, data)
                     if token:
                         self._frigate_tokens[device_id] = token
                         return token
@@ -828,14 +905,14 @@ class FrigateProxyView(BaseAPIView):
                             return web.Response(
                                 body=resp_body,
                                 status=retry_resp.status,
-                                content_type=retry_resp.content_type,
+                                headers=_proxy_response_headers(retry_resp),
                             )
 
                 resp_body = await resp.read()
                 return web.Response(
                     body=resp_body,
                     status=resp.status,
-                    content_type=resp.content_type,
+                    headers=_proxy_response_headers(resp),
                 )
         except aiohttp.ClientError as e:
             _LOGGER.error("Frigate proxy error: %s", e)
@@ -868,7 +945,7 @@ class FrigateMediaView(BaseAPIView):
     """Serve signed media URLs for notification attachments."""
 
     requires_auth = False
-    url = f"{API_MEDIA_PROXY_PATH}/{{media_kind}}/{{media_id}}"
+    url = f"{API_MEDIA_PROXY_PATH}/{{media_kind}}/{{media_id:.*}}"
     name = "api:frigate_notify_bridge:frigate_media_proxy"
 
     async def _get_frigate_token(
@@ -896,8 +973,8 @@ class FrigateMediaView(BaseAPIView):
                 json={"user": username, "password": password},
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    token = data.get("access_token")
+                    data = await _read_frigate_login_payload(resp)
+                    token = _extract_frigate_token(resp, data)
                     if token:
                         FrigateProxyView._frigate_tokens[device_id] = token
                         return token
@@ -916,10 +993,34 @@ class FrigateMediaView(BaseAPIView):
             return f"{frigate_url}/api/events/{media_id}/thumbnail.jpg"
         if media_kind == "event_snapshot":
             return f"{frigate_url}/api/events/{media_id}/snapshot.jpg"
+        if media_kind == "classification_image":
+            parts = media_id.split("/")
+            if len(parts) < 3:
+                return None
+            return (
+                f"{frigate_url}/clips/"
+                f"{'/'.join(quote(part, safe='') for part in parts)}"
+            )
         if media_kind == "review_gif":
             return f"{frigate_url}/api/review/{media_id}/preview?format=gif"
         if media_kind == "review_mp4":
             return f"{frigate_url}/api/review/{media_id}/preview?format=mp4"
+        if media_kind == "recording_clip":
+            camera_name, start_ts, end_ts = (media_id.split("/", 2) + ["", ""])[:3]
+            if not camera_name or not start_ts or not end_ts:
+                return None
+            return (
+                f"{frigate_url}/api/{quote(camera_name, safe='')}/start/"
+                f"{quote(start_ts, safe='')}/end/{quote(end_ts, safe='')}/clip.mp4"
+            )
+        if media_kind == "face_image":
+            face_name, _, image_id = media_id.partition("/")
+            if not face_name or not image_id:
+                return None
+            return (
+                f"{frigate_url}/clips/faces/"
+                f"{quote(face_name, safe='')}/{quote(image_id, safe='')}"
+            )
         return None
 
     async def get(

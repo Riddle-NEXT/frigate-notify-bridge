@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -16,6 +17,17 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .base import NotificationPayload, PushProvider, SendResult
 
 _LOGGER = logging.getLogger(__name__)
+
+_MAX_FCM_DATA_BYTES = 4096
+_MAX_ENCRYPTED_PAYLOAD_BYTES = 4096
+_MAX_TITLE_LENGTH = 120
+_MAX_BODY_LENGTH = 500
+_MAX_IMAGE_URL_LENGTH = 2048
+_MAX_THREAD_ID_LENGTH = 64
+_DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{3,128}$")
+_NOTIFICATION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+_RESERVED_NOTIFICATION_PREFIXES = ("google.", "gcm.")
+_RESERVED_NOTIFICATION_KEYS = {"from"}
 
 
 class RelayPushProvider(PushProvider):
@@ -113,28 +125,164 @@ class RelayPushProvider(PushProvider):
             "type": str((payload.data or {}).get("type", "frigate_event")),
         }
 
-        if payload.event_id:
-            data["event_id"] = payload.event_id
-        if payload.camera:
-            data["camera"] = payload.camera
-        if payload.label:
-            data["label"] = payload.label
-        if payload.zones:
-            data["zones"] = ",".join(payload.zones)
-        if payload.image_url:
-            data["image_url"] = payload.image_url
-        if payload.thumbnail_url:
-            data["thumbnail_url"] = payload.thumbnail_url
-
-        for key, value in (payload.data or {}).items():
-            if value is None:
-                continue
-            if isinstance(value, (dict, list)):
-                data[key] = json.dumps(value, separators=(",", ":"))
-            else:
+        for key in (
+            "event_id",
+            "review_id",
+            "camera",
+            "label",
+            "event_kind",
+            "sub_label",
+            "start_time",
+        ):
+            value = (payload.data or {}).get(key)
+            if value is not None and str(value):
                 data[key] = str(value)
 
+        if payload.event_id and "event_id" not in data:
+            data["event_id"] = payload.event_id
+        if payload.camera and "camera" not in data:
+            data["camera"] = payload.camera
+        if payload.label and "label" not in data:
+            data["label"] = payload.label
+
         return data
+
+    def _estimate_fcm_data_bytes(
+        self,
+        encrypted_payload: str,
+        notification_data: dict[str, str],
+        device_id: str,
+    ) -> int:
+        """Estimate the per-device FCM data payload size."""
+        message_data = {
+            "encrypted": encrypted_payload,
+            "bridgeId": self._bridge_id,
+            "deviceId": device_id,
+            "click_action": "FLUTTER_NOTIFICATION_CLICK",
+            **notification_data,
+        }
+        return len(
+            json.dumps(
+                message_data,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        )
+
+    def _validate_relay_body(
+        self,
+        body: dict[str, Any],
+        device_tokens: list[str],
+    ) -> None:
+        """Validate relay request body before sending it upstream."""
+        encrypted_payload = str(body["encryptedPayload"])
+        if len(encrypted_payload.encode("utf-8")) > _MAX_ENCRYPTED_PAYLOAD_BYTES:
+            raise ValueError("encryptedPayload exceeds 4KB limit")
+
+        title = body.get("title")
+        if title and len(str(title)) > _MAX_TITLE_LENGTH:
+            raise ValueError("title is too long")
+
+        message_body = body.get("body")
+        if message_body and len(str(message_body)) > _MAX_BODY_LENGTH:
+            raise ValueError("body is too long")
+
+        image_url = body.get("imageUrl")
+        if image_url and len(str(image_url)) > _MAX_IMAGE_URL_LENGTH:
+            raise ValueError("imageUrl is too long")
+
+        category = body.get("category")
+        if category and not _NOTIFICATION_KEY_PATTERN.fullmatch(str(category)):
+            raise ValueError("category is invalid")
+
+        thread_id = body.get("threadId")
+        if thread_id and len(str(thread_id)) > _MAX_THREAD_ID_LENGTH:
+            raise ValueError("threadId is too long")
+
+        notification_data = body.get("notificationData") or {}
+        if not isinstance(notification_data, dict):
+            raise ValueError("notificationData must be an object")
+
+        for key, value in notification_data.items():
+            normalized_key = str(key).strip()
+            if not _NOTIFICATION_KEY_PATTERN.fullmatch(normalized_key):
+                raise ValueError("notificationData contains an invalid key")
+            if normalized_key in _RESERVED_NOTIFICATION_KEYS or normalized_key.startswith(
+                _RESERVED_NOTIFICATION_PREFIXES
+            ):
+                raise ValueError("notificationData contains a reserved key")
+
+            normalized_value = str(value or "")
+            if len(normalized_value) > 1024:
+                raise ValueError("notificationData contains a value that is too long")
+
+        if not device_tokens:
+            raise ValueError("At least one target deviceId is required")
+
+        for device_id in device_tokens:
+            if not _DEVICE_ID_PATTERN.fullmatch(device_id):
+                raise ValueError("deviceId is invalid")
+
+        max_data_bytes = max(
+            self._estimate_fcm_data_bytes(encrypted_payload, notification_data, device_id)
+            for device_id in device_tokens
+        )
+        if max_data_bytes > _MAX_FCM_DATA_BYTES:
+            raise ValueError(
+                f"FCM data payload exceeds 4KB limit ({max_data_bytes} bytes)"
+            )
+
+    async def _read_relay_response(self, resp: Any) -> dict[str, Any]:
+        """Read a relay response as JSON when possible, else preserve raw text."""
+        response_text = await resp.text()
+        if not response_text:
+            return {}
+
+        try:
+            parsed = json.loads(response_text)
+        except json.JSONDecodeError:
+            return {"error": response_text.strip() or f"HTTP {resp.status}"}
+
+        return parsed if isinstance(parsed, dict) else {"response": parsed}
+
+    def _results_from_relay_response(
+        self,
+        device_tokens: list[str],
+        response_data: dict[str, Any],
+    ) -> list[SendResult]:
+        """Map relay response fields to per-device send results."""
+        error_by_device: dict[str, str] = {}
+
+        for raw_error in response_data.get("errors", []):
+            if isinstance(raw_error, str) and ":" in raw_error:
+                device_id, error = raw_error.split(":", 1)
+                error_by_device[device_id.strip()] = error.strip()
+
+        for failure in response_data.get("deliveryFailures", []):
+            if not isinstance(failure, dict):
+                continue
+            device_id = str(failure.get("deviceId", "")).strip()
+            if not device_id:
+                continue
+            error_code = str(failure.get("errorCode") or "").strip()
+            error_message = str(failure.get("errorMessage") or "").strip()
+            if error_message:
+                error_by_device[device_id] = (
+                    f"{error_code}: {error_message}" if error_code else error_message
+                )
+            elif error_code:
+                error_by_device[device_id] = error_code
+            else:
+                error_by_device.setdefault(device_id, "Delivery failed")
+
+        return [
+            SendResult(
+                success=device_id not in error_by_device,
+                device_id=device_id,
+                error=error_by_device.get(device_id),
+            )
+            for device_id in device_tokens
+        ]
 
     async def async_send(
         self,
@@ -170,6 +318,7 @@ class RelayPushProvider(PushProvider):
             "threadId": payload.camera or "frigate-mobile",
             "notificationData": self._build_notification_data(payload),
         }
+        self._validate_relay_body(body, device_tokens)
         body_json = json.dumps(body, separators=(",", ":"))
         path = "/sendNotification"
         headers = self._build_signed_headers(path, body_json)
@@ -188,7 +337,7 @@ class RelayPushProvider(PushProvider):
                 headers=headers,
                 timeout=15,
             ) as resp:
-                data = await resp.json()
+                data = await self._read_relay_response(resp)
                 _LOGGER.debug(
                     "Relay send response: status=%d bridge_id=%s body=%s",
                     resp.status,
@@ -200,26 +349,21 @@ class RelayPushProvider(PushProvider):
                     sent = data.get("sent", 0)
                     failed = data.get("failed", 0)
                     _LOGGER.debug("Relay push: %d sent, %d failed", sent, failed)
-                    error_by_device: dict[str, str] = {}
-                    for raw_error in data.get("errors", []):
-                        if isinstance(raw_error, str) and ":" in raw_error:
-                            device_id, error = raw_error.split(":", 1)
-                            error_by_device[device_id.strip()] = error.strip()
-                    results = []
-                    for token in device_tokens:
-                        results.append(SendResult(
-                            success=token not in error_by_device,
-                            device_id=token,
-                            error=error_by_device.get(token),
-                        ))
-                    return results
-                else:
-                    error = data.get("error") or data.get("detail") or f"HTTP {resp.status}"
-                    _LOGGER.error("Relay push failed: %s", error)
-                    return [
-                        SendResult(success=False, device_id=t, error=error)
-                        for t in device_tokens
-                    ]
+                    if sent + failed != len(device_tokens):
+                        _LOGGER.warning(
+                            "Relay response count mismatch: requested=%d sent=%s failed=%s",
+                            len(device_tokens),
+                            sent,
+                            failed,
+                        )
+                    return self._results_from_relay_response(device_tokens, data)
+
+                error = data.get("error") or data.get("detail") or f"HTTP {resp.status}"
+                _LOGGER.error("Relay push failed: %s", error)
+                return [
+                    SendResult(success=False, device_id=t, error=str(error))
+                    for t in device_tokens
+                ]
 
         except Exception as e:
             _LOGGER.error("Relay push error: %s", e)
