@@ -696,6 +696,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     "event_kinds": user_input.get("event_kinds", ["alert"]),
                     "cameras": self._parse_csv_list(user_input.get("cameras")),
                     "labels": self._parse_csv_list(user_input.get("labels")),
+                    "sub_labels": self._parse_csv_list(user_input.get("sub_labels")),
                     "zones": self._parse_csv_list(user_input.get("zones")),
                     "min_confidence": user_input.get("min_confidence", 0),
                     "cooldown_seconds": user_input.get("cooldown_seconds", 60),
@@ -745,8 +746,8 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                                     label="Detections",
                                 ),
                                 selector.SelectOptionDict(
-                                    value="event",
-                                    label="Legacy events",
+                                    value="recording",
+                                    label="Recordings",
                                 ),
                             ],
                             multiple=True,
@@ -760,6 +761,10 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         "labels",
                         default=self._csv_string(settings.get("labels")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "sub_labels",
+                        default=self._csv_string(settings.get("sub_labels")),
                     ): selector.TextSelector(),
                     vol.Optional(
                         "zones",

@@ -34,6 +34,27 @@ def _device_target(device: dict[str, Any], use_relay: bool) -> str | None:
     return device.get("fcm_token")
 
 
+def _normalize_event_kind(kind: Any) -> str:
+    """Normalize legacy event kinds to the app-facing values."""
+    normalized = str(kind or "recording").strip().lower()
+    if normalized == "event":
+        return "recording"
+    return normalized
+
+
+def _display_label(raw_label: Any) -> str:
+    """Format model labels for user-facing notification copy."""
+    label = str(raw_label or "object").strip()
+    if not label:
+        return "Object"
+    for suffix in ("-alert", "-detection", "-verified", "_alert", "_detection", "_verified"):
+        if label.lower().endswith(suffix):
+            label = label[: -len(suffix)]
+            break
+    label = label.replace("_", " ").replace("-", " ").strip()
+    return label.title() or "Object"
+
+
 class FrigateNotifyCoordinator:
     """Coordinate notifications between Frigate events and push providers."""
 
@@ -79,7 +100,7 @@ class FrigateNotifyCoordinator:
         label = event_data.get("label")
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
-        event_kind = str(event_data.get("event_kind", "event")).lower()
+        event_kind = _normalize_event_kind(event_data.get("event_kind", "recording"))
 
         _LOGGER.debug(
             "Processing %s notification: event=%s review=%s camera=%s label=%s",
@@ -95,6 +116,7 @@ class FrigateNotifyCoordinator:
             kind=event_kind,
             camera=camera,
             label=label,
+            sub_label=event_data.get("sub_label"),
             zones=zones,
             confidence=score,
             cooldown_key=f"{event_kind}:{review_id or event_id or camera}:{label or ''}",
@@ -178,7 +200,7 @@ class FrigateNotifyCoordinator:
         start_time = event_data.get("start_time")
         end_time = event_data.get("end_time")
         sub_label = event_data.get("sub_label")
-        event_kind = str(event_data.get("event_kind", "event")).lower()
+        event_kind = _normalize_event_kind(event_data.get("event_kind", "recording"))
         settings = device.get("notification_settings", {})
         event_ids = event_data.get("event_ids", [])
 
@@ -198,16 +220,16 @@ class FrigateNotifyCoordinator:
                     zones = details.get("current_zones", []) or details.get("entered_zones", []) or zones
 
         # Build title
-        display_label = label
+        display_label = _display_label(label)
         if objects:
-            display_label = ", ".join(str(obj).title() for obj in objects[:2])
+            display_label = ", ".join(_display_label(obj) for obj in objects[:2])
             if len(objects) > 2:
                 display_label = f"{display_label}, +{len(objects) - 2}"
-        title = f"{display_label.title()} on {camera}" if camera else f"{display_label.title()} detected"
+        title = f"{display_label} on {camera}" if camera else f"{display_label} detected"
         if event_kind == "alert":
-            title = f"{display_label.title()} alert on {camera}" if camera else f"{display_label.title()} alert"
+            title = f"{display_label} activity on {camera}" if camera else f"{display_label} activity"
         elif event_kind == "detection":
-            title = f"{display_label.title()} on {camera}" if camera else f"{display_label.title()} detected"
+            title = f"{display_label} detected on {camera}" if camera else f"{display_label} detected"
 
         # Build body
         body_parts = []
@@ -218,23 +240,17 @@ class FrigateNotifyCoordinator:
             body_parts.append(f"Zone: {', '.join(zones)}")
         if sub_label:
             body_parts.append(str(sub_label))
-        if event_kind in {"alert", "detection"}:
-            body_parts.insert(0, event_kind.title())
-
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
         # Build image URLs
         thumbnail_url = None
         image_url = None
-        gif_url = None
 
         if primary_event_id and settings.get("include_thumbnail", True):
             thumbnail_url = self._build_media_url(device, "event_thumbnail", primary_event_id)
         if primary_event_id and has_snapshot and settings.get("include_snapshot", False):
             image_url = self._build_media_url(device, "event_snapshot", primary_event_id)
-        if review_id and settings.get("include_gif_preview", False):
-            gif_url = self._build_media_url(device, "review_gif", review_id)
-        preferred_image_url = gif_url or image_url or thumbnail_url
+        preferred_image_url = image_url or thumbnail_url
 
         # Build data payload for the app
         data = {
@@ -255,32 +271,19 @@ class FrigateNotifyCoordinator:
 
         if zones:
             data["zones"] = ",".join(zones)
-
-        if self._frigate_url:
-            data["frigate_url"] = self._frigate_url
-        if thumbnail_url:
-            data["thumbnail_url"] = thumbnail_url
-        if image_url:
-            data["image_url"] = image_url
-        if gif_url:
-            data["gif_url"] = gif_url
         if start_time is not None:
             data["start_time"] = str(start_time)
         if end_time is not None:
             data["end_time"] = str(end_time)
-        if primary_event_id:
-            data["deep_link_event"] = f"/events/{primary_event_id}"
-        if camera:
-            data["deep_link_camera"] = f"/live/{camera}"
-            if start_time is not None:
-                data["deep_link_recording"] = f"/recordings/{camera}/{int(float(start_time))}"
+        if objects:
+            data["objects"] = [str(obj) for obj in objects[:4]]
 
         return NotificationPayload(
             title=title,
             body=body,
             data=data,
             image_url=preferred_image_url,
-            thumbnail_url=thumbnail_url,
+            thumbnail_url=None,
             priority="high",
             event_id=primary_event_id,
             camera=camera,
