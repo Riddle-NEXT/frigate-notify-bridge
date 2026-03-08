@@ -703,7 +703,7 @@ class TestNotificationView(BaseAPIView):
     name = "api:frigate_notify_bridge:test"
 
     async def post(self, request: web.Request) -> web.Response:
-        """Send a test notification."""
+        """Send a test notification with optional parameters."""
         device_id = self._resolve_owned_device_id(request)
         if not device_id:
             return web.json_response(
@@ -711,20 +711,34 @@ class TestNotificationView(BaseAPIView):
                 status=401,
             )
 
-        results = await self.coordinator.async_test_notification(device_id)
+        # Parse query parameters for image type and recent event usage
+        image_type = request.query.get("image_type", "thumbnail")
+        use_recent_event_str = request.query.get("use_recent_event", "true")
+        use_recent_event = use_recent_event_str.lower() in ("true", "1", "yes")
 
-        if not results:
-            return web.json_response(
-                {"error": "No FCM token configured"},
-                status=400,
+        # Call the send_test_notification service with parameters
+        hass = request.app["hass"]
+        try:
+            await hass.services.async_call(
+                DOMAIN,
+                "send_test_notification",
+                {
+                    "device_id": device_id,
+                    "image_type": image_type,
+                    "use_recent_event": use_recent_event,
+                },
+                blocking=True,
             )
-
-        result = results[0]
-        return web.json_response({
-            "success": result.success,
-            "message_id": result.message_id,
-            "error": result.error,
-        })
+            return web.json_response({
+                "success": True,
+                "message": f"Test notification sent with {image_type} image",
+            })
+        except Exception as err:
+            _LOGGER.error("Failed to send test notification: %s", err)
+            return web.json_response({
+                "success": False,
+                "error": str(err),
+            }, status=500)
 
 
 class WebRTCCredentialsView(BaseAPIView):
