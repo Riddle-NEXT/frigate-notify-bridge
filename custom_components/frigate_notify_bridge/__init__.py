@@ -41,6 +41,7 @@ from .issues import (
 from .mqtt_listener import FrigateMQTTListener
 from .device_manager import DeviceManager
 from .push_providers import create_push_provider
+from .services import async_setup_services, async_unload_services
 
 _LOGGER = logging.getLogger(__name__)
 _DOMAIN_LOGGER = logging.getLogger(f"custom_components.{DOMAIN}")
@@ -144,6 +145,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if PLATFORMS:
         await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Register services
+    async_setup_services(hass, coordinator, device_manager)
+
     # Register update listener
     entry.async_on_unload(entry.add_update_listener(async_update_options))
 
@@ -154,6 +158,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     _LOGGER.info("Unloading Frigate Notify Bridge integration")
+
+    # Unload services
+    async_unload_services(hass)
 
     # Unload platforms
     if PLATFORMS:
