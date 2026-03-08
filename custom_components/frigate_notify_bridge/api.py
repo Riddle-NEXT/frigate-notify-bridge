@@ -465,6 +465,8 @@ class DevicesView(BaseAPIView):
                 "name": device["name"],
                 "platform": device["platform"],
                 "app_version": device.get("app_version"),
+                "subscription_active": device.get("subscription_active"),
+                "subscription_last_verified_at": device.get("subscription_last_verified_at"),
                 "paired_at": device["paired_at"],
                 "last_seen": device.get("last_seen"),
             }
@@ -503,6 +505,8 @@ class DeviceView(BaseAPIView):
             "id": device["id"],
             "name": device["name"],
             "platform": device["platform"],
+            "subscription_active": device.get("subscription_active"),
+            "subscription_last_verified_at": device.get("subscription_last_verified_at"),
             "notification_settings": device.get("notification_settings", {}),
         })
 
@@ -541,6 +545,8 @@ class DeviceView(BaseAPIView):
             "device": {
                 "id": device["id"],
                 "name": device["name"],
+                "subscription_active": device.get("subscription_active"),
+                "subscription_last_verified_at": device.get("subscription_last_verified_at"),
                 "notification_settings": device.get("notification_settings", {}),
             },
         })

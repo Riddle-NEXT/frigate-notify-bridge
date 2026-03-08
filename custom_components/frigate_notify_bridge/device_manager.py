@@ -338,6 +338,8 @@ class DeviceManager:
             "platform": device_info.get("platform", "unknown"),
             "fcm_token": device_info.get("fcm_token"),
             "app_version": device_info.get("app_version"),
+            "subscription_active": None,
+            "subscription_last_verified_at": None,
             "api_token": api_token,
             "auth_mode": "native_mobile_app" if user_id else "legacy_bridge_token",
             "ha_user_id": user_id,
@@ -431,7 +433,14 @@ class DeviceManager:
         device = self._devices[device_id]
 
         # Update allowed fields
-        allowed_updates = ["name", "fcm_token", "app_version", "notification_settings", "relay_device_id"]
+        allowed_updates = [
+            "name",
+            "fcm_token",
+            "app_version",
+            "notification_settings",
+            "relay_device_id",
+            "subscription_active",
+        ]
         for key in allowed_updates:
             if key in updates:
                 if key == "notification_settings":
@@ -441,6 +450,13 @@ class DeviceManager:
                     device["notification_settings"] = self.normalize_notification_settings(
                         merged_settings
                     )
+                elif key == "subscription_active":
+                    value = updates[key]
+                    if value is None:
+                        device["subscription_active"] = None
+                    else:
+                        device["subscription_active"] = bool(value)
+                    device["subscription_last_verified_at"] = datetime.utcnow().isoformat()
                 else:
                     device[key] = updates[key]
 
@@ -517,6 +533,11 @@ class DeviceManager:
             settings = self.normalize_notification_settings(
                 device.get("notification_settings")
             )
+
+            # If the app has explicitly told us push subscription is inactive,
+            # do not send this device through the push path.
+            if device.get("subscription_active") is False:
+                continue
 
             # Check if notifications are enabled
             if not settings.get("enabled", True):
