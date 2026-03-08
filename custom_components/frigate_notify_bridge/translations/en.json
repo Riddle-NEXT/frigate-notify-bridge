@@ -152,5 +152,15 @@
       "not_configured": "Integration not fully configured",
       "no_devices": "No devices are currently paired"
     }
+  },
+  "issues": {
+    "push_provider_unavailable": {
+      "title": "Push provider unavailable",
+      "description": "Frigate Notify Bridge could not initialize the configured push provider ({provider}).\n\nReason: {reason}\n\nNotifications will stay unavailable until this is fixed. Review the integration configuration and provider credentials, then reload the integration."
+    },
+    "notification_delivery_failures": {
+      "title": "Notification delivery failures detected",
+      "description": "Frigate Notify Bridge could not deliver notifications to {failed_count} device(s): {devices}\n\nLast error: {reason}\n\nThe bridge will keep trying future notifications, but you may need to re-pair affected devices or correct the push provider configuration."
+    }
   }
 }

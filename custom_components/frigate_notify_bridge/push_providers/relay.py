@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import hmac
 import json
@@ -28,6 +29,7 @@ _DEVICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{3,128}$")
 _NOTIFICATION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _RESERVED_NOTIFICATION_PREFIXES = ("google.", "gcm.")
 _RESERVED_NOTIFICATION_KEYS = {"from"}
+_MAX_REDUCTION_LEVELS = 3  # Number of payload reduction attempts
 
 
 class RelayPushProvider(PushProvider):
@@ -54,17 +56,21 @@ class RelayPushProvider(PushProvider):
     async def async_initialize(self) -> bool:
         """Verify relay is reachable."""
         try:
+            self._clear_error()
             session = async_get_clientsession(self.hass)
             async with session.get(
                 f"{self._relay_url}/health", timeout=10
             ) as resp:
                 if resp.status == 200:
                     self._initialized = True
+                    self._clear_error()
                     _LOGGER.info("Push relay reachable at %s", self._relay_url)
                     return True
-                _LOGGER.error("Push relay health check failed: %d", resp.status)
+                self._set_error(f"Push relay health check failed: HTTP {resp.status}")
+                _LOGGER.error(self.last_error)
         except Exception as e:
-            _LOGGER.error("Push relay unreachable: %s", e)
+            self._set_error(f"Push relay unreachable: {e}")
+            _LOGGER.error(self.last_error)
         return False
 
     async def async_register_device(
@@ -146,6 +152,77 @@ class RelayPushProvider(PushProvider):
             data["label"] = payload.label
 
         return data
+
+    def _reduce_payload(
+        self,
+        payload: NotificationPayload,
+        level: int,
+    ) -> NotificationPayload:
+        """Progressively reduce payload size for retry after size errors.
+
+        Level 0: No reduction (original payload)
+        Level 1: Remove image_url (keep thumbnail if set separately)
+        Level 2: Remove all image URLs
+        Level 3: Remove optional data fields and truncate zones/objects
+        """
+        if level <= 0:
+            return payload
+
+        # Create a copy of the payload to avoid modifying the original
+        reduced = NotificationPayload(
+            title=payload.title,
+            body=payload.body,
+            data=copy.deepcopy(payload.data) if payload.data else None,
+            image_url=payload.image_url,
+            thumbnail_url=payload.thumbnail_url,
+            priority=payload.priority,
+            sound=payload.sound,
+            badge=payload.badge,
+            event_id=payload.event_id,
+            camera=payload.camera,
+            label=payload.label,
+            zones=list(payload.zones) if payload.zones else None,
+        )
+
+        if level >= 1:
+            # Remove the main image URL (saves ~200-350 bytes)
+            reduced.image_url = None
+            _LOGGER.debug("Payload reduction level 1: removed image_url")
+
+        if level >= 2:
+            # Remove thumbnail URL too (saves another ~200-350 bytes)
+            reduced.thumbnail_url = None
+            _LOGGER.debug("Payload reduction level 2: removed thumbnail_url")
+
+        if level >= 3:
+            # Truncate data fields and limit zones/objects
+            if reduced.data:
+                # Keep only essential fields
+                essential_keys = {"type", "ts", "clip", "snap"}
+                reduced.data = {
+                    k: v for k, v in reduced.data.items()
+                    if k in essential_keys
+                }
+            # Limit zones to 1
+            if reduced.zones and len(reduced.zones) > 1:
+                reduced.zones = reduced.zones[:1]
+            _LOGGER.debug("Payload reduction level 3: truncated data fields")
+
+        return reduced
+
+    def _is_payload_too_big_error(self, error: str | None) -> bool:
+        """Check if an error indicates the payload was too large."""
+        if not error:
+            return False
+        error_lower = error.lower()
+        return any(phrase in error_lower for phrase in (
+            "4kb",
+            "exceeds",
+            "too big",
+            "too large",
+            "payload size",
+            "message is too big",
+        ))
 
     def _estimate_fcm_data_bytes(
         self,
@@ -304,8 +381,69 @@ class RelayPushProvider(PushProvider):
 
         Note: device_tokens here are relay device IDs, not FCM tokens.
         The relay maps relay_device_id → FCM token internally.
+
+        Implements auto-retry with progressively reduced payloads when
+        payload size errors occur (FCM 4KB limit).
         """
-        encrypted = self._encrypt_payload(payload)
+        last_error: str | None = None
+
+        # Try with progressively reduced payloads on size errors
+        for reduction_level in range(_MAX_REDUCTION_LEVELS + 1):
+            current_payload = self._reduce_payload(payload, reduction_level)
+            results = await self._try_send(device_tokens, current_payload)
+
+            # Check if all failures are due to payload size
+            all_size_errors = all(
+                not r.success and self._is_payload_too_big_error(r.error)
+                for r in results
+            )
+
+            if not all_size_errors:
+                # Either success or non-size-related errors - return results
+                if reduction_level > 0 and any(r.success for r in results):
+                    _LOGGER.info(
+                        "Payload delivered after reduction level %d",
+                        reduction_level,
+                    )
+                return results
+
+            # All failures were size-related - try reducing further
+            last_error = results[0].error if results else "Payload too large"
+            if reduction_level < _MAX_REDUCTION_LEVELS:
+                _LOGGER.warning(
+                    "Payload too big (level %d), reducing and retrying: %s",
+                    reduction_level,
+                    last_error,
+                )
+
+        # Exhausted all reduction levels
+        _LOGGER.error(
+            "Failed to send notification after %d reduction attempts: %s",
+            _MAX_REDUCTION_LEVELS,
+            last_error,
+        )
+        return [
+            SendResult(success=False, device_id=t, error=last_error)
+            for t in device_tokens
+        ]
+
+    async def _try_send(
+        self,
+        device_tokens: list[str],
+        payload: NotificationPayload,
+    ) -> list[SendResult]:
+        """Attempt to send a notification payload to devices.
+
+        This is the core send logic extracted to support retry with reduction.
+        """
+        try:
+            encrypted = self._encrypt_payload(payload)
+        except Exception as e:
+            _LOGGER.error("Failed to encrypt payload: %s", e)
+            return [
+                SendResult(success=False, device_id=t, error=f"Encryption failed: {e}")
+                for t in device_tokens
+            ]
 
         body = {
             "bridgeId": self._bridge_id,
@@ -318,17 +456,29 @@ class RelayPushProvider(PushProvider):
             "threadId": payload.camera or "frigate-mobile",
             "notificationData": self._build_notification_data(payload),
         }
-        self._validate_relay_body(body, device_tokens)
+
+        # Validate and catch size errors early
+        try:
+            self._validate_relay_body(body, device_tokens)
+        except ValueError as e:
+            error_msg = str(e)
+            _LOGGER.warning("Payload validation failed: %s", error_msg)
+            return [
+                SendResult(success=False, device_id=t, error=error_msg)
+                for t in device_tokens
+            ]
+
         body_json = json.dumps(body, separators=(",", ":"))
         path = "/sendNotification"
         headers = self._build_signed_headers(path, body_json)
 
         try:
             _LOGGER.debug(
-                "Relay send request: bridge_id=%s devices=%s payload_bytes=%d",
+                "Relay send request: bridge_id=%s devices=%s payload_bytes=%d body_bytes=%d",
                 self._bridge_id,
                 device_tokens,
                 len(encrypted),
+                len(body_json),
             )
             session = async_get_clientsession(self.hass)
             async with session.post(

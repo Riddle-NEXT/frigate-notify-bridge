@@ -18,10 +18,12 @@ from .const import (
     CONF_FRIGATE_PASSWORD,
     DEFAULT_NOTIFICATION_TITLE,
 )
+from .issues import ISSUE_NOTIFICATION_DELIVERY
 from .push_providers.base import NotificationPayload, SendResult
 
 if TYPE_CHECKING:
     from .device_manager import DeviceManager
+    from .issues import BridgeIssueManager
     from .push_providers import PushProvider
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,12 +66,14 @@ class FrigateNotifyCoordinator:
         entry: ConfigEntry,
         push_provider: PushProvider,
         device_manager: DeviceManager,
+        issue_manager: BridgeIssueManager,
     ) -> None:
         """Initialize the coordinator."""
         self.hass = hass
         self.entry = entry
         self.push_provider = push_provider
         self.device_manager = device_manager
+        self.issue_manager = issue_manager
         self._frigate_url = entry.data.get(CONF_FRIGATE_URL)
         self._frigate_auth: tuple[str, str] | None = None
         self._frigate_api_token: str | None = None
@@ -170,6 +174,39 @@ class FrigateNotifyCoordinator:
                 failure_count,
             )
 
+            failed_device_names = [
+                device.get("name", result.device_id)
+                for device, result in zip(notified_devices, results)
+                if not result.success
+            ]
+            first_error = next(
+                (
+                    result.error
+                    for result in results
+                    if not result.success and result.error
+                ),
+                "Unknown delivery error",
+            )
+            successful_devices = [
+                device
+                for device, result in zip(notified_devices, results)
+                if result.success
+            ]
+            await self.issue_manager.async_report_notification_delivery_failure(
+                failed_devices=failed_device_names,
+                reason=first_error,
+                send_alert=(
+                    (lambda issue_id, title, body: self._async_send_issue_alert(
+                        successful_devices,
+                        issue_id,
+                        title,
+                        body,
+                    ))
+                    if successful_devices
+                    else None
+                ),
+            )
+
             # Handle failed tokens (e.g., remove invalid tokens)
             for result in results:
                 if not result.success:
@@ -180,6 +217,7 @@ class FrigateNotifyCoordinator:
                             result.device_id[:20] + "...",
                         )
         else:
+            await self.issue_manager.async_clear_issue(ISSUE_NOTIFICATION_DELIVERY)
             _LOGGER.debug("All %d notifications sent successfully", success_count)
 
     async def _build_notification_payload(
@@ -242,41 +280,43 @@ class FrigateNotifyCoordinator:
             body_parts.append(str(sub_label))
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
-        # Build image URLs
-        thumbnail_url = None
-        image_url = None
+        # Build image URL - only construct ONE URL (the preferred one) to save payload space
+        # Snapshot takes precedence if enabled and available, otherwise use thumbnail
+        preferred_image_url = None
+        if primary_event_id:
+            if has_snapshot and settings.get("include_snapshot", False):
+                preferred_image_url = self._build_media_url(device, "event_snapshot", primary_event_id)
+            elif settings.get("include_thumbnail", True):
+                preferred_image_url = self._build_media_url(device, "event_thumbnail", primary_event_id)
 
-        if primary_event_id and settings.get("include_thumbnail", True):
-            thumbnail_url = self._build_media_url(device, "event_thumbnail", primary_event_id)
-        if primary_event_id and has_snapshot and settings.get("include_snapshot", False):
-            image_url = self._build_media_url(device, "event_snapshot", primary_event_id)
-        preferred_image_url = image_url or thumbnail_url
-
-        # Build data payload for the app
-        data = {
-            "type": "frigate_event",
-            "event_kind": event_kind,
-            "event_id": primary_event_id,
-            "review_id": review_id,
-            "camera": camera,
-            "label": label,
-            "score": str(score),
-            "has_clip": str(bool(has_clip)).lower(),
-            "has_snapshot": str(bool(has_snapshot)).lower(),
-            "timestamp": event_data.get("timestamp", datetime.utcnow().isoformat()),
+        # Build compact data payload for the app (minimized for FCM 4KB limit)
+        # Fields sent in plaintext notificationData are excluded from encrypted payload
+        # to avoid duplication. The relay sends: event_id, review_id, camera, label,
+        # event_kind, sub_label, start_time in plaintext notificationData.
+        # This encrypted data dict contains only app-specific fields not in plaintext.
+        data: dict[str, Any] = {
+            "ts": str(int(datetime.utcnow().timestamp())),  # Unix timestamp (compact)
         }
 
-        if sub_label:
-            data["sub_label"] = str(sub_label)
+        # Only include booleans if true (saves bytes when false is default)
+        if has_clip:
+            data["clip"] = "1"
+        if has_snapshot:
+            data["snap"] = "1"
 
+        # Include score as integer percentage (saves ~3 bytes vs decimal string)
+        if score:
+            score_int = int(float(score) * 100) if float(score) <= 1 else int(float(score))
+            if score_int > 0:
+                data["score"] = str(score_int)
+
+        # Limit zones to 3 max to reduce payload size
         if zones:
-            data["zones"] = ",".join(zones)
-        if start_time is not None:
-            data["start_time"] = str(start_time)
-        if end_time is not None:
-            data["end_time"] = str(end_time)
-        if objects:
-            data["objects"] = [str(obj) for obj in objects[:4]]
+            data["zones"] = ",".join(zones[:3])
+
+        # Limit objects to 2 max
+        if objects and len(objects) > 0:
+            data["objects"] = [str(obj) for obj in objects[:2]]
 
         return NotificationPayload(
             title=title,
@@ -463,6 +503,40 @@ class FrigateNotifyCoordinator:
             return []
 
         return await self.push_provider.async_send_to_many(tokens, payload)
+
+    async def _async_send_issue_alert(
+        self,
+        devices: list[dict[str, Any]],
+        issue_id: str,
+        title: str,
+        body: str,
+    ) -> None:
+        """Send a minimal bridge-attention alert to devices that still work."""
+        from .push_providers.relay import RelayPushProvider
+
+        use_relay = isinstance(self.push_provider, RelayPushProvider)
+        payload = NotificationPayload(
+            title=title,
+            body=body,
+            data={
+                "type": "bridge_issue",
+                "issue_id": issue_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+            priority="high",
+        )
+
+        for device in devices:
+            token = _device_target(device, use_relay)
+            if not token:
+                continue
+            result = await self.push_provider.async_send(token, payload)
+            if not result.success:
+                _LOGGER.debug(
+                    "Bridge issue alert failed for %s: %s",
+                    device.get("name", token),
+                    result.error,
+                )
 
     def get_push_provider_info(self) -> dict[str, Any]:
         """Get information about the push provider for pairing."""

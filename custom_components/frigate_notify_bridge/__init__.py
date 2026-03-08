@@ -33,6 +33,11 @@ from .const import (
 )
 from .coordinator import FrigateNotifyCoordinator
 from .api import async_setup_api
+from .issues import (
+    BridgeIssueManager,
+    ISSUE_PUSH_PROVIDER_UNAVAILABLE,
+    ISSUE_NOTIFICATION_DELIVERY,
+)
 from .mqtt_listener import FrigateMQTTListener
 from .device_manager import DeviceManager
 from .push_providers import create_push_provider
@@ -63,6 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Setting up Frigate Notify Bridge integration")
 
     hass.data.setdefault(DOMAIN, {})
+    issue_manager = BridgeIssueManager(hass)
 
     # Initialize storage for devices and settings
     store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
@@ -75,10 +81,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _ensure_relay_registration(hass, entry)
 
     # Create push provider based on configuration
-    push_provider = await create_push_provider(hass, entry.data)
-    if push_provider is None:
-        _LOGGER.error("Failed to initialize push provider")
+    provider_name = str(entry.data.get("push_provider", "unknown")).strip() or "unknown"
+    try:
+        push_provider = await create_push_provider(hass, entry.data)
+    except Exception as err:
+        reason = str(err) or "Push provider failed to initialize"
+        await issue_manager.async_report_push_provider_unavailable(
+            provider_name=provider_name,
+            reason=reason,
+        )
+        _LOGGER.error("Failed to initialize push provider: %s", reason)
         return False
+    await issue_manager.async_clear_issue(ISSUE_PUSH_PROVIDER_UNAVAILABLE)
 
     # Create device manager
     device_manager = DeviceManager(hass, store, stored_data.get("devices", {}))
@@ -89,6 +103,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry=entry,
         push_provider=push_provider,
         device_manager=device_manager,
+        issue_manager=issue_manager,
     )
 
     # Set up MQTT listener
@@ -104,6 +119,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "mqtt_listener": mqtt_listener,
         "device_manager": device_manager,
         "push_provider": push_provider,
+        "issue_manager": issue_manager,
         "store": store,
     }
 
@@ -156,6 +172,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         push_provider = data.get("push_provider")
         if push_provider:
             await push_provider.async_close()
+
+        issue_manager = data.get("issue_manager")
+        if issue_manager:
+            await issue_manager.async_clear_issue(ISSUE_PUSH_PROVIDER_UNAVAILABLE)
+            await issue_manager.async_clear_issue(ISSUE_NOTIFICATION_DELIVERY)
 
     # Remove stored data
     hass.data[DOMAIN].pop(entry.entry_id, None)
