@@ -1,8 +1,7 @@
 """Push notification providers for Frigate Notify Bridge."""
 from __future__ import annotations
 
-import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 
@@ -29,8 +28,6 @@ from .ntfy import NtfyProvider
 from .pushover import PushoverProvider
 from .relay import RelayPushProvider
 
-_LOGGER = logging.getLogger(__name__)
-
 __all__ = [
     "PushProvider",
     "FCMProvider",
@@ -44,7 +41,7 @@ __all__ = [
 async def create_push_provider(
     hass: HomeAssistant,
     config: dict[str, Any],
-) -> PushProvider | None:
+) -> PushProvider:
     """Create a push provider based on configuration.
 
     Args:
@@ -52,20 +49,19 @@ async def create_push_provider(
         config: Configuration data from config entry
 
     Returns:
-        Initialized push provider or None on failure
+        Initialized push provider
     """
     provider_type = config.get(CONF_PUSH_PROVIDER)
 
     if provider_type == PUSH_PROVIDER_FCM:
         credentials = config.get(CONF_FCM_CREDENTIALS)
         if not credentials:
-            _LOGGER.error("FCM credentials not configured")
-            return None
+            raise RuntimeError("FCM credentials not configured")
 
         provider = FCMProvider(hass, credentials)
         if await provider.async_initialize():
             return provider
-        return None
+        raise RuntimeError(provider.last_error or "FCM provider failed to initialize")
 
     elif provider_type == PUSH_PROVIDER_NTFY:
         url = config.get(CONF_NTFY_URL)
@@ -73,26 +69,24 @@ async def create_push_provider(
         token = config.get(CONF_NTFY_TOKEN)
 
         if not topic:
-            _LOGGER.error("ntfy topic not configured")
-            return None
+            raise RuntimeError("ntfy topic not configured")
 
         provider = NtfyProvider(hass, url, topic, token)
         if await provider.async_initialize():
             return provider
-        return None
+        raise RuntimeError(provider.last_error or "ntfy provider failed to initialize")
 
     elif provider_type == PUSH_PROVIDER_PUSHOVER:
         user_key = config.get(CONF_PUSHOVER_USER_KEY)
         api_token = config.get(CONF_PUSHOVER_API_TOKEN)
 
         if not user_key or not api_token:
-            _LOGGER.error("Pushover credentials not configured")
-            return None
+            raise RuntimeError("Pushover credentials not configured")
 
         provider = PushoverProvider(hass, user_key, api_token)
         if await provider.async_initialize():
             return provider
-        return None
+        raise RuntimeError(provider.last_error or "Pushover provider failed to initialize")
 
     elif provider_type == PUSH_PROVIDER_RELAY:
         import base64
@@ -103,15 +97,13 @@ async def create_push_provider(
         e2e_key_b64 = config.get(CONF_RELAY_E2E_KEY)
 
         if not all([relay_url, bridge_id, bridge_secret, e2e_key_b64]):
-            _LOGGER.error("Relay push provider: missing configuration")
-            return None
+            raise RuntimeError("Relay push provider: missing configuration")
 
         e2e_key = base64.b64decode(e2e_key_b64)
         provider = RelayPushProvider(hass, relay_url, bridge_id, bridge_secret, e2e_key)
         if await provider.async_initialize():
             return provider
-        return None
+        raise RuntimeError(provider.last_error or "Relay push provider failed to initialize")
 
     else:
-        _LOGGER.error("Unknown push provider: %s", provider_type)
-        return None
+        raise RuntimeError(f"Unknown push provider: {provider_type}")

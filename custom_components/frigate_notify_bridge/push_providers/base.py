@@ -72,6 +72,7 @@ class PushProvider(ABC):
         """Initialize the provider."""
         self.hass = hass
         self._initialized = False
+        self._last_error: str | None = None
 
     @property
     def name(self) -> str:
@@ -82,6 +83,20 @@ class PushProvider(ABC):
     def is_initialized(self) -> bool:
         """Return whether the provider is initialized."""
         return self._initialized
+
+    @property
+    def last_error(self) -> str | None:
+        """Return the last provider error, if any."""
+        return self._last_error
+
+    def _set_error(self, message: str) -> None:
+        """Record a provider error."""
+        self._initialized = False
+        self._last_error = message
+
+    def _clear_error(self) -> None:
+        """Clear the last provider error."""
+        self._last_error = None
 
     @abstractmethod
     async def async_initialize(self) -> bool:

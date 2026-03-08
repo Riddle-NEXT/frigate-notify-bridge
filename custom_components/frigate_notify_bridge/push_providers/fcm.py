@@ -47,31 +47,38 @@ class FCMProvider(PushProvider):
     async def async_initialize(self) -> bool:
         """Initialize provider by parsing credentials."""
         try:
+            self._clear_error()
             self._credentials = json.loads(self._credentials_json)
             self._project_id = self._credentials.get("project_id")
 
             if not self._project_id:
-                _LOGGER.error("Firebase credentials missing project_id")
+                self._set_error("Firebase credentials missing project_id")
+                _LOGGER.error(self.last_error)
                 return False
 
             private_key = self._credentials.get("private_key")
             if not private_key:
-                _LOGGER.error("Firebase credentials missing private_key")
+                self._set_error("Firebase credentials missing private_key")
+                _LOGGER.error(self.last_error)
                 return False
 
             client_email = self._credentials.get("client_email")
             if not client_email:
-                _LOGGER.error("Firebase credentials missing client_email")
+                self._set_error("Firebase credentials missing client_email")
+                _LOGGER.error(self.last_error)
                 return False
 
             self._initialized = True
+            self._clear_error()
             _LOGGER.info("FCM provider initialized for project: %s", self._project_id)
             return True
 
         except json.JSONDecodeError as e:
-            _LOGGER.error("Failed to parse FCM credentials JSON: %s", e)
+            self._set_error(f"Failed to parse FCM credentials JSON: {e}")
+            _LOGGER.error(self.last_error)
             return False
         except Exception as e:
+            self._set_error(f"Failed to initialize FCM provider: {e}")
             _LOGGER.exception("Failed to initialize FCM provider: %s", e)
             return False
 
