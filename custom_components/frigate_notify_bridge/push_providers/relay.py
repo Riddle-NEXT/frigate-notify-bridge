@@ -126,32 +126,16 @@ class RelayPushProvider(PushProvider):
         self,
         payload: NotificationPayload,
     ) -> dict[str, str]:
-        """Build compact plaintext routing metadata for OS-visible notifications."""
-        data: dict[str, str] = {
-            "type": str((payload.data or {}).get("type", "frigate_event")),
-        }
+        """Build notification data for FCM - METADATA ONLY (no sensitive data).
 
-        for key in (
-            "event_id",
-            "review_id",
-            "camera",
-            "label",
-            "event_kind",
-            "sub_label",
-            "start_time",
-        ):
-            value = (payload.data or {}).get(key)
-            if value is not None and str(value):
-                data[key] = str(value)
+        All sensitive data (event_id, camera, label, etc.) is encrypted in the
+        encrypted payload for full end-to-end encryption. Only relay metadata
+        (bridgeId, deviceId, click_action) is added in plaintext by the relay.
 
-        if payload.event_id and "event_id" not in data:
-            data["event_id"] = payload.event_id
-        if payload.camera and "camera" not in data:
-            data["camera"] = payload.camera
-        if payload.label and "label" not in data:
-            data["label"] = payload.label
-
-        return data
+        This ensures zero plaintext leakage of security camera information.
+        """
+        # Return empty dict - relay adds: encrypted, bridgeId, deviceId, click_action
+        return {}
 
     def _reduce_payload(
         self,

@@ -280,12 +280,16 @@ class FrigateNotifyCoordinator:
             body_parts.append(str(sub_label))
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
-        # Build image URL - only construct ONE URL (the preferred one) to save payload space
-        # Snapshot takes precedence if enabled and available, otherwise use thumbnail
+        # Build image URL - check preference order (GIF > snapshot > thumbnail)
         preferred_image_url = None
         if primary_event_id:
-            if has_snapshot and settings.get("include_snapshot", False):
+            # Priority 1: Animated preview GIF (if enabled)
+            if settings.get("include_gif_preview", False):
+                preferred_image_url = self._build_media_url(device, "event_preview_gif", primary_event_id)
+            # Priority 2: Static snapshot
+            elif has_snapshot and settings.get("include_snapshot", False):
                 preferred_image_url = self._build_media_url(device, "event_snapshot", primary_event_id)
+            # Priority 3: Thumbnail (default)
             elif settings.get("include_thumbnail", True):
                 preferred_image_url = self._build_media_url(device, "event_thumbnail", primary_event_id)
 
