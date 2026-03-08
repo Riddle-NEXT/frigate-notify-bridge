@@ -93,11 +93,28 @@ def async_setup_services(
         event_id = None
         event_data = None
         if use_recent_event:
-            # Try to get a recent event from MQTT state
-            # This is a simplified example - you may need to query Frigate API
-            # or use cached event data from the coordinator
+            # Try to get a recent event from Frigate API
             _LOGGER.debug("Looking for recent event to use as test template")
-            # TODO: Implement recent event lookup via Frigate API or cached data
+            frigate_url = coordinator.entry.data.get("frigate_url")
+            if frigate_url:
+                try:
+                    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+                    session = async_get_clientsession(hass)
+
+                    # Get the most recent event with a snapshot
+                    async with session.get(
+                        f"{frigate_url}/api/events?limit=1&has_snapshot=1",
+                        timeout=10,
+                        ssl=False,
+                    ) as resp:
+                        if resp.status == 200:
+                            events = await resp.json()
+                            if events and len(events) > 0:
+                                event_data = events[0]
+                                event_id = event_data.get("id")
+                                _LOGGER.debug("Found recent event: %s", event_id)
+                except Exception as err:
+                    _LOGGER.warning("Failed to fetch recent event from Frigate: %s", err)
 
         # Build test notification payload
         from .coordinator import NotificationPayload
