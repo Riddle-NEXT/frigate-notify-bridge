@@ -1,0 +1,37 @@
+# Services for Frigate Notify Bridge
+
+send_test_notification:
+  name: Send Test Notification
+  description: Send a test push notification to a paired mobile device with configurable image types.
+  fields:
+    device_id:
+      name: Device ID
+      description: The unique identifier of the paired mobile device to send the test notification to.
+      required: true
+      example: "abc123-device-id-xyz789"
+      selector:
+        text:
+    image_type:
+      name: Image Type
+      description: Type of image to include in the test notification.
+      required: false
+      default: "thumbnail"
+      example: "gif"
+      selector:
+        select:
+          options:
+            - label: "GIF Preview"
+              value: "gif"
+            - label: "Snapshot"
+              value: "snapshot"
+            - label: "Thumbnail"
+              value: "thumbnail"
+            - label: "No Image"
+              value: "none"
+    use_recent_event:
+      name: Use Recent Event
+      description: Use data from a recent Frigate event as the test notification template (if available). If false or no recent event exists, uses mock data.
+      required: false
+      default: true
+      selector:
+        boolean:
