@@ -1127,14 +1127,14 @@ class FrigateMediaView(BaseAPIView):
                             return web.Response(
                                 status=retry.status,
                                 body=retry_body,
-                                content_type=retry.content_type,
+                                headers=_proxy_response_headers(retry),
                             )
 
                 body = await resp.read()
                 return web.Response(
                     status=resp.status,
                     body=body,
-                    content_type=resp.content_type,
+                    headers=_proxy_response_headers(resp),
                 )
         except Exception as err:
             _LOGGER.error("Frigate media proxy error: %s", err)
