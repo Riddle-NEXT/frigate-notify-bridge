@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from pathlib import Path
 import ssl
 from typing import Any, TYPE_CHECKING
 from urllib.parse import quote
@@ -44,6 +45,10 @@ if TYPE_CHECKING:
     from .device_manager import DeviceManager
 
 _LOGGER = logging.getLogger(__name__)
+_SAMPLE_NOTIFICATION_IMAGE_ID = "bridge_sample_alert"
+_SAMPLE_NOTIFICATION_IMAGE_PATH = (
+    Path(__file__).resolve().parent / "brand" / "icon@2x.png"
+)
 
 
 def _extract_frigate_token(
@@ -716,22 +721,39 @@ class TestNotificationView(BaseAPIView):
         use_recent_event_str = request.query.get("use_recent_event", "true")
         use_recent_event = use_recent_event_str.lower() in ("true", "1", "yes")
 
-        # Call the send_test_notification service with parameters
-        hass = request.app["hass"]
         try:
-            await hass.services.async_call(
-                DOMAIN,
-                "send_test_notification",
-                {
-                    "device_id": device_id,
-                    "image_type": image_type,
-                    "use_recent_event": use_recent_event,
-                },
-                blocking=True,
+            device = await self.device_manager.async_get_device(device_id)
+            if not device:
+                return web.json_response(
+                    {"success": False, "error": "Device not found"},
+                    status=404,
+                )
+
+            _, metadata = await self.coordinator.build_test_notification_payload(
+                device,
+                image_type=image_type,
+                use_recent_event=use_recent_event,
             )
+            results = await self.coordinator.async_test_notification(
+                device_id,
+                image_type=image_type,
+                use_recent_event=use_recent_event,
+            )
+            first_result = results[0] if results else None
+            if first_result is None or not first_result.success:
+                return web.json_response({
+                    "success": False,
+                    "error": first_result.error if first_result else "No push token available for device",
+                    "source": metadata.get("source"),
+                    "has_image": metadata.get("has_image"),
+                    "message": "Test notification failed",
+                }, status=500)
+
             return web.json_response({
                 "success": True,
                 "message": f"Test notification sent with {image_type} image",
+                "source": metadata.get("source"),
+                "has_image": metadata.get("has_image"),
             })
         except Exception as err:
             _LOGGER.error("Failed to send test notification: %s", err)
@@ -1005,6 +1027,9 @@ class FrigateMediaView(BaseAPIView):
 
     def _build_target_url(self, media_kind: str, media_id: str) -> str | None:
         """Translate a signed media path into the upstream Frigate URL."""
+        if media_kind == "sample_image" and media_id == _SAMPLE_NOTIFICATION_IMAGE_ID:
+            return str(_SAMPLE_NOTIFICATION_IMAGE_PATH)
+
         frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
         if not frigate_url:
             return None
@@ -1075,6 +1100,12 @@ class FrigateMediaView(BaseAPIView):
         target_url = self._build_target_url(media_kind, media_id)
         if not target_url:
             return web.json_response({"error": "Unsupported media"}, status=404)
+
+        if media_kind == "sample_image":
+            sample_path = Path(target_url)
+            if not sample_path.exists():
+                return web.json_response({"error": "Sample image missing"}, status=404)
+            return web.FileResponse(path=sample_path)
 
         session = async_get_clientsession(request.app["hass"])
         headers: dict[str, str] = {}
