@@ -94,27 +94,41 @@ def async_setup_services(
         event_data = None
         if use_recent_event:
             # Try to get a recent event from Frigate API
-            _LOGGER.debug("Looking for recent event to use as test template")
             frigate_url = coordinator.entry.data.get("frigate_url")
+            _LOGGER.info("Fetching recent event from Frigate for test notification (url=%s)", frigate_url)
             if frigate_url:
                 try:
                     from homeassistant.helpers.aiohttp_client import async_get_clientsession
                     session = async_get_clientsession(hass)
 
                     # Get the most recent event with a snapshot
+                    api_url = f"{frigate_url}/api/events?limit=1&has_snapshot=1"
+                    _LOGGER.debug("Calling Frigate API: %s", api_url)
                     async with session.get(
-                        f"{frigate_url}/api/events?limit=1&has_snapshot=1",
+                        api_url,
                         timeout=10,
                         ssl=False,
                     ) as resp:
                         if resp.status == 200:
                             events = await resp.json()
+                            _LOGGER.info("Frigate API returned %d events", len(events) if events else 0)
                             if events and len(events) > 0:
                                 event_data = events[0]
                                 event_id = event_data.get("id")
-                                _LOGGER.debug("Found recent event: %s", event_id)
+                                _LOGGER.info(
+                                    "Using recent event %s (camera=%s, label=%s) for test notification",
+                                    event_id,
+                                    event_data.get("camera"),
+                                    event_data.get("label")
+                                )
+                            else:
+                                _LOGGER.warning("No recent events found in Frigate with snapshots")
+                        else:
+                            _LOGGER.warning("Frigate API returned status %d", resp.status)
                 except Exception as err:
-                    _LOGGER.warning("Failed to fetch recent event from Frigate: %s", err)
+                    _LOGGER.error("Failed to fetch recent event from Frigate: %s", err, exc_info=True)
+            else:
+                _LOGGER.warning("No Frigate URL configured - cannot fetch recent events")
 
         # Build test notification payload
         from .coordinator import NotificationPayload
@@ -149,18 +163,28 @@ def async_setup_services(
 
         # Build media URL if requested
         image_url = None
-        if image_type != "none" and event_id:
-            if image_type == "gif":
-                image_url = coordinator._build_media_url(
-                    device, "event_preview_gif", event_id
-                )
-            elif image_type == "snapshot":
-                image_url = coordinator._build_media_url(
-                    device, "event_snapshot", event_id
-                )
-            elif image_type == "thumbnail":
-                image_url = coordinator._build_media_url(
-                    device, "event_thumbnail", event_id
+        if image_type != "none":
+            if event_id:
+                # We have a real event - build the image URL
+                if image_type == "gif":
+                    image_url = coordinator._build_media_url(
+                        device, "event_preview_gif", event_id
+                    )
+                elif image_type == "snapshot":
+                    image_url = coordinator._build_media_url(
+                        device, "event_snapshot", event_id
+                    )
+                elif image_type == "thumbnail":
+                    image_url = coordinator._build_media_url(
+                        device, "event_thumbnail", event_id
+                    )
+                _LOGGER.info("Test notification with %s image from event %s", image_type, event_id)
+            else:
+                # No recent event found - log warning
+                _LOGGER.warning(
+                    "Test notification requested with %s image but no recent Frigate event found. "
+                    "Create some events in Frigate first, or disable 'use_recent_event'.",
+                    image_type
                 )
 
         payload = NotificationPayload(
