@@ -1,6 +1,7 @@
 """Coordinator for Frigate Notify Bridge."""
 from __future__ import annotations
 
+from pathlib import Path
 import logging
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
     from .push_providers import PushProvider
 
 _LOGGER = logging.getLogger(__name__)
+_SAMPLE_NOTIFICATION_IMAGE_ID = "bridge_sample_alert"
+_SAMPLE_NOTIFICATION_IMAGE_PATH = (
+    Path(__file__).resolve().parent / "brand" / "icon@2x.png"
+)
 
 
 def _device_target(device: dict[str, Any], use_relay: bool) -> str | None:
@@ -335,6 +340,202 @@ class FrigateNotifyCoordinator:
             zones=zones,
         )
 
+    async def _async_get_review_details(self, review_id: str) -> dict[str, Any] | None:
+        """Fetch full review details from Frigate when needed."""
+        if not self._frigate_url or not review_id:
+            return None
+
+        session = async_get_clientsession(self.hass)
+        headers: dict[str, str] = {}
+        token = await self._async_get_frigate_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            async with session.get(
+                f"{self._frigate_url}/api/review/{review_id}",
+                headers=headers,
+                timeout=10,
+                ssl=False,
+            ) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status == 401 and token:
+                    self._frigate_api_token = None
+        except aiohttp.ClientError as err:
+            _LOGGER.debug(
+                "Unable to fetch Frigate review details for %s: %s",
+                review_id,
+                err,
+            )
+        return None
+
+    async def _async_get_recent_review(
+        self,
+        severity: str,
+    ) -> dict[str, Any] | None:
+        """Fetch the most recent Frigate review for a given severity."""
+        if not self._frigate_url:
+            return None
+
+        session = async_get_clientsession(self.hass)
+        headers: dict[str, str] = {}
+        token = await self._async_get_frigate_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        try:
+            async with session.get(
+                f"{self._frigate_url}/api/review",
+                headers=headers,
+                params={"limit": 1, "severity": severity},
+                timeout=10,
+                ssl=False,
+            ) as response:
+                if response.status == 200:
+                    reviews = await response.json()
+                    if isinstance(reviews, list) and reviews:
+                        return reviews[0]
+                if response.status == 401 and token:
+                    self._frigate_api_token = None
+        except aiohttp.ClientError as err:
+            _LOGGER.debug(
+                "Unable to fetch recent Frigate %s review: %s",
+                severity,
+                err,
+            )
+        return None
+
+    async def build_test_notification_payload(
+        self,
+        device: dict[str, Any],
+        image_type: str = "thumbnail",
+        use_recent_event: bool = True,
+    ) -> tuple[NotificationPayload, dict[str, Any]]:
+        """Build a test notification payload with deterministic fallbacks."""
+        image_type = image_type if image_type in {"gif", "snapshot", "thumbnail", "none"} else "thumbnail"
+        source = "sample"
+        review: dict[str, Any] | None = None
+
+        if use_recent_event:
+            review = await self._async_get_recent_review("alert")
+            if review:
+                source = "recent_alert"
+            else:
+                review = await self._async_get_recent_review("detection")
+                if review:
+                    source = "recent_detection"
+
+        review_id = review.get("id") if review else None
+        if review_id:
+            details = await self._async_get_review_details(str(review_id))
+            if details:
+                review = details
+
+        if review:
+            camera = str(review.get("camera") or "Unknown")
+            severity = str(review.get("severity") or "alert").strip().lower()
+            review_data = review.get("data") or {}
+            objects = review_data.get("objects") or []
+            label = (
+                objects[0]
+                if isinstance(objects, list) and objects
+                else review.get("label") or "object"
+            )
+            label_text = _display_label(label)
+            noun = "activity" if severity == "alert" else "detection"
+            title = f"Test: {label_text} {noun} on {camera}"
+            body = (
+                "Using your most recent Frigate alert."
+                if severity == "alert"
+                else "Using your most recent Frigate detection."
+            )
+
+            image_url = None
+            if image_type != "none":
+                if image_type == "gif":
+                    image_url = self._build_media_url(device, "review_gif", str(review_id))
+                elif image_type in {"snapshot", "thumbnail"}:
+                    primary_event_id = None
+                    detections = review_data.get("detections") or []
+                    if isinstance(detections, list) and detections:
+                        primary_event_id = str(detections[0])
+                    if primary_event_id:
+                        media_kind = (
+                            "event_snapshot" if image_type == "snapshot" else "event_thumbnail"
+                        )
+                        image_url = self._build_media_url(device, media_kind, primary_event_id)
+                    elif image_type == "thumbnail":
+                        image_url = self._build_media_url(
+                            device,
+                            "sample_image",
+                            _SAMPLE_NOTIFICATION_IMAGE_ID,
+                        )
+
+            payload = NotificationPayload(
+                title=title,
+                body=body,
+                data={
+                    "type": "frigate_test",
+                    "test_source": source,
+                    "review_id": str(review_id),
+                    "camera": camera,
+                    "label": str(label),
+                    "severity": severity,
+                },
+                image_url=image_url,
+                thumbnail_url=None,
+                priority="high",
+                event_id=(
+                    str((review_data.get("detections") or [None])[0])
+                    if isinstance(review_data.get("detections"), list) and review_data.get("detections")
+                    else f"test-review-{review_id}"
+                ),
+                camera=camera,
+                label=str(label),
+                zones=list(review.get("zones") or []),
+            )
+            return payload, {
+                "source": source,
+                "used_recent_event": True,
+                "image_type": image_type,
+                "has_image": bool(image_url),
+                "review_id": str(review_id),
+            }
+
+        sample_image_url = None
+        if image_type != "none":
+            sample_image_url = self._build_media_url(
+                device,
+                "sample_image",
+                _SAMPLE_NOTIFICATION_IMAGE_ID,
+            )
+
+        payload = NotificationPayload(
+            title="Test: Person activity on Front Door",
+            body="Sample alert fallback from Frigate Notify Bridge.",
+            data={
+                "type": "frigate_test",
+                "test_source": "sample",
+                "camera": "Front Door",
+                "label": "person",
+                "severity": "alert",
+            },
+            image_url=sample_image_url,
+            thumbnail_url=None,
+            priority="high",
+            event_id=f"sample-alert-{int(datetime.utcnow().timestamp())}",
+            camera="Front Door",
+            label="person",
+            zones=["entryway"],
+        )
+        return payload, {
+            "source": "sample",
+            "used_recent_event": False,
+            "image_type": image_type,
+            "has_image": bool(sample_image_url),
+        }
+
     def _build_media_url(
         self,
         device: dict[str, Any],
@@ -462,6 +663,9 @@ class FrigateNotifyCoordinator:
     async def async_test_notification(
         self,
         device_id: str | None = None,
+        *,
+        image_type: str = "thumbnail",
+        use_recent_event: bool = True,
     ) -> list[SendResult]:
         """Send a test notification.
 
@@ -471,16 +675,6 @@ class FrigateNotifyCoordinator:
         Returns:
             List of send results
         """
-        payload = NotificationPayload(
-            title="Test Notification",
-            body="This is a test from Frigate Notify Bridge",
-            data={
-                "type": "test",
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-            priority="normal",
-        )
-
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
@@ -492,21 +686,34 @@ class FrigateNotifyCoordinator:
             token = _device_target(device, use_relay)
             if not token:
                 return []
+            payload, _ = await self.build_test_notification_payload(
+                device,
+                image_type=image_type,
+                use_recent_event=use_recent_event,
+            )
             result = await self.push_provider.async_send(token, payload)
             return [result]
 
         # Send to all devices
         devices = await self.device_manager.async_get_devices()
-        tokens = []
+        payload_by_token: list[tuple[str, NotificationPayload]] = []
         for device in devices.values():
             token = _device_target(device, use_relay)
             if token:
-                tokens.append(token)
+                payload, _ = await self.build_test_notification_payload(
+                    device,
+                    image_type=image_type,
+                    use_recent_event=use_recent_event,
+                )
+                payload_by_token.append((token, payload))
 
-        if not tokens:
+        if not payload_by_token:
             return []
 
-        return await self.push_provider.async_send_to_many(tokens, payload)
+        results: list[SendResult] = []
+        for token, payload in payload_by_token:
+            results.append(await self.push_provider.async_send(token, payload))
+        return results
 
     async def _async_send_issue_alert(
         self,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import json
 import logging
 from typing import Any
 
@@ -87,122 +88,36 @@ def async_setup_services(
             _LOGGER.error("Device not found: %s", device_id)
             raise ValueError(f"Device not found: {device_id}")
 
-        settings = device.get("settings", {})
-
-        # Get recent event if requested
-        event_id = None
-        event_data = None
-        if use_recent_event:
-            # Try to get a recent event from Frigate API
-            frigate_url = coordinator.entry.data.get("frigate_url")
-            _LOGGER.info("Fetching recent event from Frigate for test notification (url=%s)", frigate_url)
-            if frigate_url:
-                try:
-                    from homeassistant.helpers.aiohttp_client import async_get_clientsession
-                    session = async_get_clientsession(hass)
-
-                    # Get the most recent event with a snapshot
-                    api_url = f"{frigate_url}/api/events?limit=1&has_snapshot=1"
-                    _LOGGER.debug("Calling Frigate API: %s", api_url)
-                    async with session.get(
-                        api_url,
-                        timeout=10,
-                        ssl=False,
-                    ) as resp:
-                        if resp.status == 200:
-                            events = await resp.json()
-                            _LOGGER.info("Frigate API returned %d events", len(events) if events else 0)
-                            if events and len(events) > 0:
-                                event_data = events[0]
-                                event_id = event_data.get("id")
-                                _LOGGER.info(
-                                    "Using recent event %s (camera=%s, label=%s) for test notification",
-                                    event_id,
-                                    event_data.get("camera"),
-                                    event_data.get("label")
-                                )
-                            else:
-                                _LOGGER.warning("No recent events found in Frigate with snapshots")
-                        else:
-                            _LOGGER.warning("Frigate API returned status %d", resp.status)
-                except Exception as err:
-                    _LOGGER.error("Failed to fetch recent event from Frigate: %s", err, exc_info=True)
-            else:
-                _LOGGER.warning("No Frigate URL configured - cannot fetch recent events")
-
-        # Build test notification payload
-        from .coordinator import NotificationPayload
-
-        # Override image preferences based on requested type
-        test_settings = dict(settings)
-        test_settings["include_gif_preview"] = image_type == "gif"
-        test_settings["include_snapshot"] = image_type == "snapshot"
-        test_settings["include_thumbnail"] = image_type == "thumbnail"
-
-        # If none, disable all images
-        if image_type == "none":
-            test_settings["include_gif_preview"] = False
-            test_settings["include_snapshot"] = False
-            test_settings["include_thumbnail"] = False
-
-        # Create test payload
-        if event_data and event_id:
-            # Use real event data
-            title = f"🧪 Test: {event_data.get('label', 'Unknown')} detected"
-            body = f"Camera: {event_data.get('camera', 'Unknown')}"
-            payload_event_id = event_id
-            camera = event_data.get("camera")
-            label = event_data.get("label")
-        else:
-            # Use mock data
-            title = "🧪 Test Notification"
-            body = "This is a test notification from Frigate Notify Bridge"
-            payload_event_id = "test-" + datetime.now().strftime("%Y%m%d-%H%M%S")
-            camera = "test_camera"
-            label = "person"
-
-        # Build media URL if requested
-        image_url = None
-        if image_type != "none":
-            if event_id:
-                # We have a real event - build the image URL
-                if image_type == "gif":
-                    image_url = coordinator._build_media_url(
-                        device, "event_preview_gif", event_id
-                    )
-                elif image_type == "snapshot":
-                    image_url = coordinator._build_media_url(
-                        device, "event_snapshot", event_id
-                    )
-                elif image_type == "thumbnail":
-                    image_url = coordinator._build_media_url(
-                        device, "event_thumbnail", event_id
-                    )
-                _LOGGER.info("Test notification with %s image from event %s", image_type, event_id)
-            else:
-                # No recent event found - log warning
-                _LOGGER.warning(
-                    "Test notification requested with %s image but no recent Frigate event found. "
-                    "Create some events in Frigate first, or disable 'use_recent_event'.",
-                    image_type
-                )
-
-        payload = NotificationPayload(
-            title=title,
-            body=body,
-            data={"type": "frigate_test"},
-            image_url=image_url,
-            thumbnail_url=None,
-            priority="high",
-            event_id=payload_event_id,
-            camera=camera,
-            label=label,
-            zones=[],
-        )
-
         # Send notification
         try:
-            await coordinator._send_notification(device_id, payload, test_settings)
+            _, metadata = await coordinator.build_test_notification_payload(
+                device,
+                image_type=image_type,
+                use_recent_event=use_recent_event,
+            )
+            _LOGGER.info(
+                "Prepared test notification for %s using source=%s image_type=%s has_image=%s",
+                device_id,
+                metadata.get("source"),
+                metadata.get("image_type"),
+                metadata.get("has_image"),
+            )
+            result = await coordinator.async_test_notification(
+                device_id,
+                image_type=image_type,
+                use_recent_event=use_recent_event,
+            )
+            if not result or not result[0].success:
+                error = result[0].error if result else "No push token available for device"
+                raise ValueError(
+                    json.dumps(
+                        {
+                            "error": error,
+                            "source": metadata.get("source"),
+                            "has_image": metadata.get("has_image"),
+                        }
+                    )
+                )
             _LOGGER.info("Test notification sent successfully to device %s", device_id)
 
             # Record successful test for rate limiting
