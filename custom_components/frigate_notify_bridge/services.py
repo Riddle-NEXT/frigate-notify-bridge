@@ -82,7 +82,7 @@ def async_setup_services(
             )
 
         # Get device settings
-        device = device_manager.get_device(device_id)
+        device = await device_manager.async_get_device(device_id)
         if not device:
             _LOGGER.error("Device not found: %s", device_id)
             raise ValueError(f"Device not found: {device_id}")
