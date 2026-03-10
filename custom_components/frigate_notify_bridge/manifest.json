@@ -12,5 +12,5 @@
     "qrcode>=7.4.0"
   ],
   "after_dependencies": ["mqtt"],
-  "version": "0.13.10"
+  "version": "0.13.11"
 }

@@ -1,6 +1,7 @@
 """REST API for Frigate Notify Bridge mobile app communication."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -909,19 +910,28 @@ class FrigateProxyView(BaseAPIView):
         if query_string:
             target = f"{target}?{query_string}"
 
-        # Read request body if present
-        body = None
-        if method in ("POST", "PUT", "PATCH"):
-            body = await request.read()
-
         session = async_get_clientsession(request.app["hass"])
-        # Get Frigate auth token if needed
         headers = {}
         frigate_token = await self._get_frigate_token(
             session, frigate_url, device_id
         )
         if frigate_token:
             headers["Authorization"] = f"Bearer {frigate_token}"
+
+        ws_probe = web.WebSocketResponse()
+        if method == "GET" and ws_probe.can_prepare(request).ok:
+            return await self._proxy_websocket(
+                request,
+                target=target,
+                session=session,
+                headers=headers,
+                device_id=device_id,
+            )
+
+        # Read request body if present
+        body = None
+        if method in ("POST", "PUT", "PATCH"):
+            body = await request.read()
 
         # Forward content-type from original request
         content_type = request.content_type
@@ -961,6 +971,65 @@ class FrigateProxyView(BaseAPIView):
             return web.json_response(
                 {"error": "Failed to reach Frigate"}, status=502
             )
+
+    async def _proxy_websocket(
+        self,
+        request: web.Request,
+        *,
+        target: str,
+        session: aiohttp.ClientSession,
+        headers: dict[str, str],
+        device_id: str,
+    ) -> web.StreamResponse:
+        """Proxy a websocket request to Frigate/go2rtc."""
+        server_ws = web.WebSocketResponse(heartbeat=30)
+        await server_ws.prepare(request)
+
+        upstream_ws = None
+        try:
+            upstream_ws = await session.ws_connect(
+                target,
+                headers=headers,
+                heartbeat=30,
+                autoclose=False,
+                autoping=True,
+            )
+
+            async def client_to_upstream() -> None:
+                async for message in server_ws:
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        await upstream_ws.send_str(message.data)
+                    elif message.type == aiohttp.WSMsgType.BINARY:
+                        await upstream_ws.send_bytes(message.data)
+                    elif message.type == aiohttp.WSMsgType.CLOSE:
+                        await upstream_ws.close()
+
+            async def upstream_to_client() -> None:
+                async for message in upstream_ws:
+                    if message.type == aiohttp.WSMsgType.TEXT:
+                        await server_ws.send_str(message.data)
+                    elif message.type == aiohttp.WSMsgType.BINARY:
+                        await server_ws.send_bytes(message.data)
+                    elif message.type == aiohttp.WSMsgType.CLOSE:
+                        await server_ws.close()
+
+            await asyncio.gather(client_to_upstream(), upstream_to_client())
+        except aiohttp.WSServerHandshakeError as err:
+            _LOGGER.error("Frigate websocket proxy handshake failed: %s", err)
+            if upstream_ws is None:
+                if device_id in self._frigate_tokens:
+                    self._frigate_tokens.pop(device_id, None)
+                await server_ws.send_json({"error": "WebRTC handshake failed"})
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Frigate websocket proxy error: %s", err)
+            await server_ws.send_json({"error": "Failed to reach Frigate"})
+        finally:
+            if upstream_ws is not None and not upstream_ws.closed:
+                await upstream_ws.close()
+            if not server_ws.closed:
+                await server_ws.close()
+
+        return server_ws
 
     async def get(self, request: web.Request, path: str = "") -> web.Response:
         """Handle GET."""
