@@ -903,10 +903,14 @@ class FrigateProxyView(BaseAPIView):
                 {"error": "Frigate URL not configured"}, status=503
             )
 
-        # Build target URL
-        path = request.match_info.get("path", "")
+        # Build target URL. Most bridge proxy requests target Frigate's `/api/*`
+        # namespace, but live WebRTC websocket requests are rooted at `/live/*`.
+        path = request.match_info.get("path", "").lstrip("/")
         query_string = request.query_string
-        target = f"{frigate_url}/api/{path}"
+        if path.startswith("live/"):
+            target = f"{frigate_url}/{path}"
+        else:
+            target = f"{frigate_url}/api/{path}"
         if query_string:
             target = f"{target}?{query_string}"
 
