@@ -1,6 +1,7 @@
 """Coordinator for Frigate Notify Bridge."""
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import logging
 from datetime import datetime
@@ -140,13 +141,12 @@ class FrigateNotifyCoordinator:
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
-        results: list[SendResult] = []
-        notified_devices: list[dict[str, Any]] = []
-
-        for device in devices:
+        async def send_for_device(
+            device: dict[str, Any],
+        ) -> tuple[dict[str, Any], SendResult] | None:
             token = _device_target(device, use_relay)
             if not token:
-                continue
+                return None
             payload = await self._build_notification_payload(event_data, device)
             _LOGGER.info(
                 "Sending %s notification to device %s for event=%s review=%s",
@@ -156,8 +156,14 @@ class FrigateNotifyCoordinator:
                 review_id,
             )
             result = await self.push_provider.async_send(token, payload)
-            results.append(result)
-            notified_devices.append(device)
+            return device, result
+
+        send_results = await asyncio.gather(
+            *(send_for_device(device) for device in devices)
+        )
+        notified_pairs = [item for item in send_results if item is not None]
+        notified_devices = [device for device, _ in notified_pairs]
+        results = [result for _, result in notified_pairs]
 
         if not results:
             _LOGGER.debug("No device targets available for notification")
@@ -248,19 +254,6 @@ class FrigateNotifyCoordinator:
         event_ids = event_data.get("event_ids", [])
 
         primary_event_id = event_id or (event_ids[0] if event_ids else None)
-        if primary_event_id:
-            details = await self._async_get_event_details(primary_event_id)
-            if details:
-                score = details.get("score", score)
-                has_snapshot = details.get("has_snapshot", has_snapshot)
-                has_clip = details.get("has_clip", has_clip)
-                start_time = details.get("start_time", start_time)
-                end_time = details.get("end_time", end_time)
-                sub_label = details.get("sub_label", sub_label)
-                if not label or label == "object":
-                    label = details.get("label", label)
-                if not zones:
-                    zones = details.get("current_zones", []) or details.get("entered_zones", []) or zones
 
         # Build title
         display_label = _display_label(label)
@@ -287,7 +280,9 @@ class FrigateNotifyCoordinator:
 
         # Build image URL - check preference order (GIF > snapshot > thumbnail)
         preferred_image_url = None
-        if primary_event_id:
+        if review_id and settings.get("include_gif_preview", False):
+            preferred_image_url = self._build_media_url(device, "review_gif", str(review_id))
+        elif primary_event_id:
             # Priority 1: Animated preview GIF (if enabled)
             if settings.get("include_gif_preview", False):
                 preferred_image_url = self._build_media_url(device, "event_preview_gif", primary_event_id)

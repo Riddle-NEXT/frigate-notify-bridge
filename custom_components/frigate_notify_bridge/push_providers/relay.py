@@ -145,9 +145,9 @@ class RelayPushProvider(PushProvider):
         """Progressively reduce payload size for retry after size errors.
 
         Level 0: No reduction (original payload)
-        Level 1: Remove image_url (keep thumbnail if set separately)
-        Level 2: Remove all image URLs
-        Level 3: Remove optional data fields and truncate zones/objects
+        Level 1: Remove non-essential data fields
+        Level 2: Remove thumbnail URL and extra zones
+        Level 3: Remove all image URLs
         """
         if level <= 0:
             return payload
@@ -169,28 +169,23 @@ class RelayPushProvider(PushProvider):
         )
 
         if level >= 1:
-            # Remove the main image URL (saves ~200-350 bytes)
-            reduced.image_url = None
-            _LOGGER.debug("Payload reduction level 1: removed image_url")
+            if reduced.data:
+                essential_keys = {"type", "ts", "clip", "snap", "score"}
+                reduced.data = {
+                    k: v for k, v in reduced.data.items() if k in essential_keys
+                }
+            _LOGGER.debug("Payload reduction level 1: reduced notification data")
 
         if level >= 2:
-            # Remove thumbnail URL too (saves another ~200-350 bytes)
             reduced.thumbnail_url = None
-            _LOGGER.debug("Payload reduction level 2: removed thumbnail_url")
-
-        if level >= 3:
-            # Truncate data fields and limit zones/objects
-            if reduced.data:
-                # Keep only essential fields
-                essential_keys = {"type", "ts", "clip", "snap"}
-                reduced.data = {
-                    k: v for k, v in reduced.data.items()
-                    if k in essential_keys
-                }
-            # Limit zones to 1
             if reduced.zones and len(reduced.zones) > 1:
                 reduced.zones = reduced.zones[:1]
-            _LOGGER.debug("Payload reduction level 3: truncated data fields")
+            _LOGGER.debug("Payload reduction level 2: trimmed thumbnails/zones")
+
+        if level >= 3:
+            reduced.image_url = None
+            reduced.thumbnail_url = None
+            _LOGGER.debug("Payload reduction level 3: removed image URLs")
 
         return reduced
 

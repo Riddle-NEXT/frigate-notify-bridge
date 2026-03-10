@@ -24,6 +24,7 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+NONE_FILTER_VALUE = "__none__"
 
 DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "enabled": True,
@@ -559,16 +560,28 @@ class DeviceManager:
             allowed_sub_labels = settings.get("sub_labels", [])
             if allowed_sub_labels:
                 normalized_sub_label = str(sub_label or "").strip()
-                if not normalized_sub_label or normalized_sub_label not in allowed_sub_labels:
+                allows_none = NONE_FILTER_VALUE in allowed_sub_labels
+                matches_none = allows_none and not normalized_sub_label
+                matches_value = (
+                    bool(normalized_sub_label)
+                    and normalized_sub_label in allowed_sub_labels
+                )
+                if not matches_none and not matches_value:
                     continue
 
             # Check zone filter
             allowed_zones = settings.get("zones", [])
             if allowed_zones:
+                allows_none = NONE_FILTER_VALUE in allowed_zones
                 if not zone_set:
-                    continue
-                if not zone_set.intersection(allowed_zones):
-                    continue
+                    if not allows_none:
+                        continue
+                else:
+                    matching_zones = zone_set.intersection(
+                        {zone for zone in allowed_zones if zone != NONE_FILTER_VALUE}
+                    )
+                    if not matching_zones:
+                        continue
 
             min_confidence = settings.get("min_confidence", 0)
             if confidence_percent is not None and confidence_percent < min_confidence:
