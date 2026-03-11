@@ -986,6 +986,11 @@ class FrigateProxyView(BaseAPIView):
         device_id: str,
     ) -> web.StreamResponse:
         """Proxy a websocket request to Frigate/go2rtc."""
+        _LOGGER.warning(
+            "Frigate websocket proxy opening: device_id=%s target=%s",
+            device_id,
+            target,
+        )
         server_ws = web.WebSocketResponse(heartbeat=30)
         await server_ws.prepare(request)
 
@@ -1002,19 +1007,58 @@ class FrigateProxyView(BaseAPIView):
             async def client_to_upstream() -> None:
                 async for message in server_ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload = json.loads(message.data)
+                            msg_type = payload.get("type")
+                        except Exception:  # pragma: no cover - debug logging only
+                            msg_type = "unparsed"
+                        _LOGGER.warning(
+                            "Frigate websocket proxy client->upstream: device_id=%s type=%s",
+                            device_id,
+                            msg_type,
+                        )
                         await upstream_ws.send_str(message.data)
                     elif message.type == aiohttp.WSMsgType.BINARY:
+                        _LOGGER.warning(
+                            "Frigate websocket proxy client->upstream: device_id=%s type=binary size=%s",
+                            device_id,
+                            len(message.data),
+                        )
                         await upstream_ws.send_bytes(message.data)
                     elif message.type == aiohttp.WSMsgType.CLOSE:
+                        _LOGGER.warning(
+                            "Frigate websocket proxy client->upstream: device_id=%s type=close",
+                            device_id,
+                        )
                         await upstream_ws.close()
 
             async def upstream_to_client() -> None:
                 async for message in upstream_ws:
                     if message.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            payload = json.loads(message.data)
+                            msg_type = payload.get("type")
+                        except Exception:  # pragma: no cover - debug logging only
+                            msg_type = "unparsed"
+                        _LOGGER.warning(
+                            "Frigate websocket proxy upstream->client: device_id=%s type=%s payload=%s",
+                            device_id,
+                            msg_type,
+                            message.data[:300],
+                        )
                         await server_ws.send_str(message.data)
                     elif message.type == aiohttp.WSMsgType.BINARY:
+                        _LOGGER.warning(
+                            "Frigate websocket proxy upstream->client: device_id=%s type=binary size=%s",
+                            device_id,
+                            len(message.data),
+                        )
                         await server_ws.send_bytes(message.data)
                     elif message.type == aiohttp.WSMsgType.CLOSE:
+                        _LOGGER.warning(
+                            "Frigate websocket proxy upstream->client: device_id=%s type=close",
+                            device_id,
+                        )
                         await server_ws.close()
 
             await asyncio.gather(client_to_upstream(), upstream_to_client())
@@ -1032,6 +1076,11 @@ class FrigateProxyView(BaseAPIView):
                 await upstream_ws.close()
             if not server_ws.closed:
                 await server_ws.close()
+            _LOGGER.warning(
+                "Frigate websocket proxy closed: device_id=%s target=%s",
+                device_id,
+                target,
+            )
 
         return server_ws
 
