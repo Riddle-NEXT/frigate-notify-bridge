@@ -213,7 +213,7 @@ class PairingQRView(BaseAPIView):
         """Generate and return a pairing QR code."""
         # Get query parameters
         size = int(request.query.get("size", "300"))
-        format_type = request.query.get("format", "json")  # json, png, or data
+        format_type = request.query.get("format", "json")  # json, png, data, payload
 
         # Generate pairing code
         pairing_info = self.device_manager.generate_pairing_code()
@@ -279,6 +279,16 @@ class PairingQRView(BaseAPIView):
                     {"error": "Failed to generate QR code"},
                     status=500,
                 )
+
+        elif format_type == "payload":
+            return web.json_response({
+                "code": qr_data["code"],
+                "expires_at": qr_data["expires_at"],
+                "expires_in": qr_data["expires_in"],
+                "using_cloud": qr_data.get("using_cloud", False),
+                "webrtc_available": qr_data.get("webrtc_available", False),
+                "payload": qr_data["payload"],
+            })
 
         else:
             # Return JSON with QR URL
@@ -921,6 +931,12 @@ class FrigateProxyView(BaseAPIView):
         )
         if frigate_token:
             headers["Authorization"] = f"Bearer {frigate_token}"
+        else:
+            _LOGGER.warning(
+                "Frigate proxy proceeding without Frigate token: device_id=%s path=%s",
+                device_id,
+                path,
+            )
 
         ws_probe = web.WebSocketResponse()
         if method == "GET" and ws_probe.can_prepare(request).ok:
@@ -964,7 +980,36 @@ class FrigateProxyView(BaseAPIView):
                                 headers=_proxy_response_headers(retry_resp),
                             )
 
+                if method == "GET" and resp.status in (500, 502, 503, 504):
+                    await resp.read()
+                    await asyncio.sleep(0.25)
+                    async with session.request(
+                        method, target, headers=headers, data=body
+                    ) as retry_resp:
+                        retry_body = await retry_resp.read()
+                        if retry_resp.status >= 400:
+                            _LOGGER.warning(
+                                "Frigate proxy retry response: device_id=%s method=%s target=%s status=%s",
+                                device_id,
+                                method,
+                                target,
+                                retry_resp.status,
+                            )
+                        return web.Response(
+                            body=retry_body,
+                            status=retry_resp.status,
+                            headers=_proxy_response_headers(retry_resp),
+                        )
+
                 resp_body = await resp.read()
+                if resp.status >= 400:
+                    _LOGGER.warning(
+                        "Frigate proxy response: device_id=%s method=%s target=%s status=%s",
+                        device_id,
+                        method,
+                        target,
+                        resp.status,
+                    )
                 return web.Response(
                     body=resp_body,
                     status=resp.status,
@@ -1160,6 +1205,8 @@ class FrigateMediaView(BaseAPIView):
             return f"{frigate_url}/api/events/{media_id}/thumbnail.jpg"
         if media_kind == "event_snapshot":
             return f"{frigate_url}/api/events/{media_id}/snapshot.jpg"
+        if media_kind == "event_clip":
+            return f"{frigate_url}/api/events/{media_id}/clip.mp4"
         if media_kind == "event_preview_gif":
             return f"{frigate_url}/api/events/{media_id}/preview?format=gif"
         if media_kind == "classification_image":
@@ -1174,6 +1221,8 @@ class FrigateMediaView(BaseAPIView):
             return f"{frigate_url}/api/review/{media_id}/preview?format=gif"
         if media_kind == "review_mp4":
             return f"{frigate_url}/api/review/{media_id}/preview?format=mp4"
+        if media_kind == "review_thumbnail":
+            return None
         if media_kind == "recording_clip":
             camera_name, start_ts, end_ts = (media_id.split("/", 2) + ["", ""])[:3]
             if not camera_name or not start_ts or not end_ts:
@@ -1190,6 +1239,73 @@ class FrigateMediaView(BaseAPIView):
                 f"{frigate_url}/clips/faces/"
                 f"{quote(face_name, safe='')}/{quote(image_id, safe='')}"
             )
+        return None
+
+    async def _resolve_review_thumbnail_url(
+        self,
+        session: aiohttp.ClientSession,
+        frigate_url: str,
+        review_id: str,
+        headers: dict[str, str],
+    ) -> str | None:
+        """Resolve the real thumbnail path for a review item."""
+        try:
+            async with session.get(
+                f"{frigate_url}/api/review/{review_id}",
+                headers=headers,
+                timeout=20,
+            ) as resp:
+                if resp.status == 401 and headers.get("Authorization"):
+                    return None
+                if resp.status >= 400:
+                    _LOGGER.warning(
+                        "Review thumbnail lookup failed: review_id=%s status=%s",
+                        review_id,
+                        resp.status,
+                    )
+                    return None
+                payload = await resp.json()
+        except Exception as err:
+            _LOGGER.error(
+                "Review thumbnail lookup error for %s: %s",
+                review_id,
+                err,
+            )
+            return None
+
+        detections = payload.get("data", {}).get("detections") or []
+        if detections:
+            return f"{frigate_url}/api/events/{detections[0]}/thumbnail.jpg"
+
+        thumb_path = payload.get("thumb_path")
+        if thumb_path and thumb_path.startswith("/api/"):
+            return f"{frigate_url}{thumb_path}"
+
+        return f"{frigate_url}/api/review/{review_id}/preview?format=gif"
+
+    async def _resolve_review_fallback_url(
+        self,
+        session: aiohttp.ClientSession,
+        frigate_url: str,
+        review_id: str,
+        headers: dict[str, str],
+    ) -> str | None:
+        """Resolve a stable fallback image for a review preview."""
+        try:
+            async with session.get(
+                f"{frigate_url}/api/review/{review_id}",
+                headers=headers,
+                timeout=20,
+            ) as resp:
+                if resp.status >= 400:
+                    return None
+                payload = await resp.json()
+        except Exception:
+            return None
+
+        detections = payload.get("data", {}).get("detections") or []
+        if detections:
+            return f"{frigate_url}/api/events/{detections[0]}/thumbnail.jpg"
         return None
 
     async def get(
@@ -1217,17 +1333,22 @@ class FrigateMediaView(BaseAPIView):
             expires=expires,
             signature=signature,
         ):
+            expected = self.device_manager.create_media_signature(
+                device_id,
+                media_kind,
+                media_id,
+                expires,
+            )
+            _LOGGER.warning(
+                "Invalid media signature: device_id=%s media_kind=%s media_id=%s expires=%s received=%s expected=%s",
+                device_id,
+                media_kind,
+                media_id,
+                expires,
+                signature,
+                expected,
+            )
             return web.json_response({"error": "Invalid signature"}, status=401)
-
-        target_url = self._build_target_url(media_kind, media_id)
-        if not target_url:
-            return web.json_response({"error": "Unsupported media"}, status=404)
-
-        if media_kind == "sample_image":
-            sample_path = Path(target_url)
-            if not sample_path.exists():
-                return web.json_response({"error": "Sample image missing"}, status=404)
-            return web.FileResponse(path=sample_path)
 
         session = async_get_clientsession(request.app["hass"])
         headers: dict[str, str] = {}
@@ -1236,6 +1357,25 @@ class FrigateMediaView(BaseAPIView):
             token = await self._get_frigate_token(session, frigate_url, device_id)
             if token:
                 headers["Authorization"] = f"Bearer {token}"
+
+        target_url = self._build_target_url(media_kind, media_id)
+        if media_kind == "review_thumbnail":
+            if not frigate_url:
+                return web.json_response({"error": "Unsupported media"}, status=404)
+            target_url = await self._resolve_review_thumbnail_url(
+                session,
+                frigate_url,
+                media_id,
+                headers,
+            )
+        if not target_url:
+            return web.json_response({"error": "Unsupported media"}, status=404)
+
+        if media_kind == "sample_image":
+            sample_path = Path(target_url)
+            if not sample_path.exists():
+                return web.json_response({"error": "Sample image missing"}, status=404)
+            return web.FileResponse(path=sample_path)
 
         try:
             async with session.get(target_url, headers=headers, timeout=20) as resp:
@@ -1252,7 +1392,36 @@ class FrigateMediaView(BaseAPIView):
                                 headers=_proxy_response_headers(retry),
                             )
 
+                if resp.status >= 400 and media_kind == "review_gif":
+                    fallback_url = await self._resolve_review_fallback_url(
+                        session,
+                        frigate_url,
+                        media_id,
+                        headers,
+                    )
+                    if fallback_url:
+                        async with session.get(
+                            fallback_url,
+                            headers=headers,
+                            timeout=20,
+                        ) as fallback_resp:
+                            fallback_body = await fallback_resp.read()
+                            return web.Response(
+                                status=fallback_resp.status,
+                                body=fallback_body,
+                                headers=_proxy_response_headers(fallback_resp),
+                            )
+
                 body = await resp.read()
+                if resp.status >= 400:
+                    _LOGGER.warning(
+                        "Frigate media proxy response: device_id=%s media_kind=%s media_id=%s target=%s status=%s",
+                        device_id,
+                        media_kind,
+                        media_id,
+                        target_url,
+                        resp.status,
+                    )
                 return web.Response(
                     status=resp.status,
                     body=body,

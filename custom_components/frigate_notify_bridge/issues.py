@@ -1,6 +1,7 @@
 """Home Assistant Repairs issue helpers for Frigate Notify Bridge."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
@@ -15,6 +16,7 @@ _LOGGER = logging.getLogger(__name__)
 ISSUE_PUSH_PROVIDER_UNAVAILABLE = "push_provider_unavailable"
 ISSUE_NOTIFICATION_DELIVERY = "notification_delivery_failures"
 _PUSH_ALERT_COOLDOWN = timedelta(hours=6)
+_ISSUE_ALERT_GRACE_PERIOD = timedelta(minutes=2)
 
 IssueAlertCallback = Callable[[str, str, str], Awaitable[None]]
 
@@ -27,6 +29,7 @@ class BridgeIssueManager:
         self.hass = hass
         self._active_fingerprints: dict[str, str] = {}
         self._last_alert_at: dict[str, datetime] = {}
+        self._pending_alerts: dict[str, asyncio.Task[None]] = {}
 
     async def async_report_push_provider_unavailable(
         self,
@@ -106,13 +109,19 @@ class BridgeIssueManager:
         self._active_fingerprints[issue_id] = fingerprint
 
         if should_send_alert:
-            try:
-                await send_alert(issue_id, alert_title, alert_body)
-            except Exception as err:  # pragma: no cover - defensive logging
-                _LOGGER.warning("Failed to send bridge issue alert for %s: %s", issue_id, err)
+            self._schedule_alert(
+                issue_id=issue_id,
+                fingerprint=fingerprint,
+                send_alert=send_alert,
+                alert_title=alert_title,
+                alert_body=alert_body,
+            )
 
     async def async_clear_issue(self, issue_id: str) -> None:
         """Delete a Repairs issue if it is active."""
+        pending_task = self._pending_alerts.pop(issue_id, None)
+        if pending_task:
+            pending_task.cancel()
         try:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
         except Exception:  # pragma: no cover - defensive cleanup
@@ -138,3 +147,35 @@ class BridgeIssueManager:
             return True
 
         return False
+
+    def _schedule_alert(
+        self,
+        issue_id: str,
+        fingerprint: str,
+        send_alert: IssueAlertCallback,
+        alert_title: str,
+        alert_body: str,
+    ) -> None:
+        """Send issue alerts only if they persist beyond a short grace period."""
+        existing_task = self._pending_alerts.pop(issue_id, None)
+        if existing_task:
+            existing_task.cancel()
+
+        async def _delayed_alert() -> None:
+            try:
+                await asyncio.sleep(_ISSUE_ALERT_GRACE_PERIOD.total_seconds())
+                if self._active_fingerprints.get(issue_id) != fingerprint:
+                    return
+                await send_alert(issue_id, alert_title, alert_body)
+            except asyncio.CancelledError:
+                return
+            except Exception as err:  # pragma: no cover - defensive logging
+                _LOGGER.warning(
+                    "Failed to send bridge issue alert for %s: %s",
+                    issue_id,
+                    err,
+                )
+            finally:
+                self._pending_alerts.pop(issue_id, None)
+
+        self._pending_alerts[issue_id] = self.hass.async_create_task(_delayed_alert())

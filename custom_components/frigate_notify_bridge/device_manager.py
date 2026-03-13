@@ -24,15 +24,20 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+MEDIA_SIGNATURE_CLOCK_SKEW_SECONDS = 24 * 60 * 60
 NONE_FILTER_VALUE = "__none__"
 
 DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "enabled": True,
     "event_kinds": ["alert"],
     "cameras": [],
+    "excluded_cameras": [],
     "labels": [],
+    "excluded_labels": [],
     "sub_labels": [],
+    "excluded_sub_labels": [],
     "zones": [],
+    "excluded_zones": [],
     "min_confidence": 0,
     "cooldown_seconds": 60,
     "quiet_hours_start": None,
@@ -143,9 +148,13 @@ class DeviceManager:
             "enabled": bool(merged.get("enabled", True)),
             "event_kinds": event_kinds,
             "cameras": _string_list("cameras"),
+            "excluded_cameras": _string_list("excluded_cameras"),
             "labels": _string_list("labels"),
+            "excluded_labels": _string_list("excluded_labels"),
             "sub_labels": _string_list("sub_labels"),
+            "excluded_sub_labels": _string_list("excluded_sub_labels"),
             "zones": _string_list("zones"),
+            "excluded_zones": _string_list("excluded_zones"),
             "min_confidence": min_confidence,
             "cooldown_seconds": cooldown_seconds,
             "quiet_hours_start": _hour_or_none("quiet_hours_start"),
@@ -195,12 +204,40 @@ class DeviceManager:
         signature: str,
     ) -> bool:
         """Validate a signed media proxy URL."""
-        if expires < int(datetime.utcnow().timestamp()):
+        now_ts = int(datetime.utcnow().timestamp())
+        if expires + MEDIA_SIGNATURE_CLOCK_SKEW_SECONDS < now_ts:
+            _LOGGER.warning(
+                "Media signature expired beyond skew tolerance: device_id=%s media_kind=%s media_id=%s expires=%s now=%s skew=%s",
+                device_id,
+                media_kind,
+                media_id,
+                expires,
+                now_ts,
+                MEDIA_SIGNATURE_CLOCK_SKEW_SECONDS,
+            )
             return False
         expected = self.create_media_signature(device_id, media_kind, media_id, expires)
         if not expected:
+            _LOGGER.warning(
+                "Media signature missing secret/device: device_id=%s media_kind=%s media_id=%s",
+                device_id,
+                media_kind,
+                media_id,
+            )
             return False
-        return hmac.compare_digest(expected, signature)
+        is_valid = hmac.compare_digest(expected, signature)
+        if not is_valid:
+            _LOGGER.warning(
+                "Media signature compare failed: device_id=%s media_kind=%s media_id=%s expires=%s now=%s received_len=%s expected_len=%s",
+                device_id,
+                media_kind,
+                media_id,
+                expires,
+                now_ts,
+                len(signature),
+                len(expected),
+            )
+        return is_valid
 
     def generate_pairing_code(self) -> dict[str, Any]:
         """Generate a new pairing code and token.
@@ -402,13 +439,29 @@ class DeviceManager:
         device = self._devices.pop(device_id)
         await self.async_save()
 
-        # Remove the HA device registry entry so it doesn't linger as an orphan
         device_registry = dr.async_get(self.hass)
-        device_entry = device_registry.async_get_device(
+        device_entries_to_remove: list[str] = []
+
+        # Remove the bridge device registry entry so it doesn't linger as an orphan.
+        bridge_device_entry = device_registry.async_get_device(
             identifiers={(DOMAIN, device_id)}
         )
-        if device_entry:
-            device_registry.async_remove_device(device_entry.id)
+        if bridge_device_entry:
+            device_entries_to_remove.append(bridge_device_entry.id)
+
+        # When this paired bridge device originated from the HA mobile app flow,
+        # also remove the linked mobile_app device entry so the user does not end
+        # up with a stale orphaned phone/tablet device in HA after unpairing.
+        mobile_app_device_id = device.get("mobile_app_device_id")
+        if mobile_app_device_id:
+            mobile_app_entry = device_registry.async_get_device(
+                identifiers={("mobile_app", str(mobile_app_device_id))}
+            )
+            if mobile_app_entry:
+                device_entries_to_remove.append(mobile_app_entry.id)
+
+        for registry_id in dict.fromkeys(device_entries_to_remove):
+            device_registry.async_remove_device(registry_id)
 
         # Notify listeners
         async_dispatcher_send(self.hass, SIGNAL_DEVICE_REMOVED, device_id)
@@ -549,17 +602,30 @@ class DeviceManager:
 
             # Check camera filter
             allowed_cameras = settings.get("cameras", [])
+            excluded_cameras = settings.get("excluded_cameras", [])
+            if excluded_cameras and camera and camera in excluded_cameras:
+                continue
             if allowed_cameras and camera and camera not in allowed_cameras:
                 continue
 
             # Check label filter
             allowed_labels = settings.get("labels", [])
+            excluded_labels = settings.get("excluded_labels", [])
+            if excluded_labels and label and label in excluded_labels:
+                continue
             if allowed_labels and label and label not in allowed_labels:
                 continue
 
             allowed_sub_labels = settings.get("sub_labels", [])
+            excluded_sub_labels = settings.get("excluded_sub_labels", [])
+            normalized_sub_label = str(sub_label or "").strip()
+            if (
+                excluded_sub_labels
+                and normalized_sub_label
+                and normalized_sub_label in excluded_sub_labels
+            ):
+                continue
             if allowed_sub_labels:
-                normalized_sub_label = str(sub_label or "").strip()
                 allows_none = NONE_FILTER_VALUE in allowed_sub_labels
                 matches_none = allows_none and not normalized_sub_label
                 matches_value = (
@@ -571,6 +637,9 @@ class DeviceManager:
 
             # Check zone filter
             allowed_zones = settings.get("zones", [])
+            excluded_zones = set(settings.get("excluded_zones", []))
+            if excluded_zones and zone_set.intersection(excluded_zones):
+                continue
             if allowed_zones:
                 allows_none = NONE_FILTER_VALUE in allowed_zones
                 if not zone_set:

@@ -695,9 +695,13 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     "enabled": user_input.get("enabled", True),
                     "event_kinds": user_input.get("event_kinds", ["alert"]),
                     "cameras": self._parse_csv_list(user_input.get("cameras")),
+                    "excluded_cameras": self._parse_csv_list(user_input.get("excluded_cameras")),
                     "labels": self._parse_csv_list(user_input.get("labels")),
+                    "excluded_labels": self._parse_csv_list(user_input.get("excluded_labels")),
                     "sub_labels": self._parse_csv_list(user_input.get("sub_labels")),
+                    "excluded_sub_labels": self._parse_csv_list(user_input.get("excluded_sub_labels")),
                     "zones": self._parse_csv_list(user_input.get("zones")),
+                    "excluded_zones": self._parse_csv_list(user_input.get("excluded_zones")),
                     "min_confidence": user_input.get("min_confidence", 0),
                     "cooldown_seconds": user_input.get("cooldown_seconds", 60),
                     "quiet_hours_start": user_input.get("quiet_hours_start"),
@@ -759,16 +763,32 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                         default=self._csv_string(settings.get("cameras")),
                     ): selector.TextSelector(),
                     vol.Optional(
+                        "excluded_cameras",
+                        default=self._csv_string(settings.get("excluded_cameras")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
                         "labels",
                         default=self._csv_string(settings.get("labels")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "excluded_labels",
+                        default=self._csv_string(settings.get("excluded_labels")),
                     ): selector.TextSelector(),
                     vol.Optional(
                         "sub_labels",
                         default=self._csv_string(settings.get("sub_labels")),
                     ): selector.TextSelector(),
                     vol.Optional(
+                        "excluded_sub_labels",
+                        default=self._csv_string(settings.get("excluded_sub_labels")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
                         "zones",
                         default=self._csv_string(settings.get("zones")),
+                    ): selector.TextSelector(),
+                    vol.Optional(
+                        "excluded_zones",
+                        default=self._csv_string(settings.get("excluded_zones")),
                     ): selector.TextSelector(),
                     vol.Optional(
                         "min_confidence",
