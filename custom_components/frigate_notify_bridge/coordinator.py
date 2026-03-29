@@ -15,9 +15,12 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     API_MEDIA_PROXY_PATH,
+    CONF_CAMERA_GROUPS,
+    CONF_CROSS_CAMERA_COOLDOWN,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
     CONF_FRIGATE_PASSWORD,
+    DEFAULT_CROSS_CAMERA_COOLDOWN,
     DEFAULT_NOTIFICATION_TITLE,
 )
 from .issues import ISSUE_NOTIFICATION_DELIVERY
@@ -61,6 +64,19 @@ def _display_label(raw_label: Any) -> str:
             break
     label = label.replace("_", " ").replace("-", " ").strip()
     return label.title() or "Object"
+
+
+def _format_sub_label(raw: str) -> str:
+    """Format a sub_label for display (title case, clean separators)."""
+    return raw.replace("_", " ").replace("-", " ").strip().title()
+
+
+def _is_modifier_sub_label(sub_label: str) -> bool:
+    """Check if a sub_label is a modifier (e.g. with_package) rather than an identity (e.g. John)."""
+    lower = sub_label.lower().strip()
+    return lower.startswith("with") or lower in {
+        "package", "bicycle", "pet", "vehicle",
+    }
 
 
 class FrigateNotifyCoordinator:
@@ -122,6 +138,10 @@ class FrigateNotifyCoordinator:
         )
 
         # Get devices that should receive this notification
+        camera_groups = self.entry.options.get(CONF_CAMERA_GROUPS, {})
+        cross_camera_cooldown = self.entry.options.get(
+            CONF_CROSS_CAMERA_COOLDOWN, DEFAULT_CROSS_CAMERA_COOLDOWN
+        )
         devices = await self.device_manager.async_get_devices_for_notification(
             kind=event_kind,
             camera=camera,
@@ -130,6 +150,8 @@ class FrigateNotifyCoordinator:
             zones=zones,
             confidence=score,
             cooldown_key=f"{event_kind}:{review_id or event_id or camera}:{label or ''}",
+            camera_groups=camera_groups,
+            cross_camera_cooldown_seconds=cross_camera_cooldown,
         )
 
         if not devices:
@@ -255,12 +277,24 @@ class FrigateNotifyCoordinator:
 
         primary_event_id = event_id or (event_ids[0] if event_ids else None)
 
-        # Build title
+        # Build title — enrich with sub_label when available
         display_label = _display_label(label)
+        sub_label_is_identity = False
         if objects:
             display_label = ", ".join(_display_label(obj) for obj in objects[:2])
             if len(objects) > 2:
                 display_label = f"{display_label}, +{len(objects) - 2}"
+
+        if sub_label and str(sub_label).strip():
+            cleaned_sub = str(sub_label).strip()
+            if _is_modifier_sub_label(cleaned_sub):
+                # Modifier: "Person With Package"
+                display_label = f"{display_label} {_format_sub_label(cleaned_sub)}"
+            else:
+                # Identity: use sub_label as primary name (e.g. "John", "Buddy")
+                sub_label_is_identity = True
+                display_label = _format_sub_label(cleaned_sub)
+
         title = f"{display_label} on {camera}" if camera else f"{display_label} detected"
         if event_kind == "alert":
             title = f"{display_label} activity on {camera}" if camera else f"{display_label} activity"
@@ -269,13 +303,14 @@ class FrigateNotifyCoordinator:
 
         # Build body
         body_parts = []
+        # When sub_label replaced the label in the title, show the base label as context
+        if sub_label_is_identity:
+            body_parts.append(_display_label(label))
         if score:
             score_percent = int(float(score) * 100) if float(score) <= 1 else int(float(score))
             body_parts.append(f"Confidence: {score_percent}%")
         if zones:
             body_parts.append(f"Zone: {', '.join(zones)}")
-        if sub_label:
-            body_parts.append(str(sub_label))
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
         # Build image URL - check preference order (GIF > snapshot > thumbnail)
@@ -332,6 +367,7 @@ class FrigateNotifyCoordinator:
             event_id=primary_event_id,
             camera=camera,
             label=label,
+            sub_label=str(sub_label) if sub_label else None,
             zones=zones,
         )
 

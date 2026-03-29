@@ -158,17 +158,43 @@ class FrigateNotifyBridge:
             len(results) - success_count,
         )
 
+    @staticmethod
+    def _format_sub_label(raw: str) -> str:
+        """Format a sub_label for display."""
+        return raw.replace("_", " ").replace("-", " ").strip().title()
+
+    @staticmethod
+    def _is_modifier_sub_label(sub_label: str) -> bool:
+        """Check if a sub_label is a modifier rather than an identity."""
+        lower = sub_label.lower().strip()
+        return lower.startswith("with") or lower in {
+            "package", "bicycle", "pet", "vehicle",
+        }
+
     def _build_notification(self, event_data: dict[str, Any]) -> dict[str, Any]:
         """Build notification payload from event data."""
         event_id = event_data.get("event_id")
         camera = event_data.get("camera", "Unknown")
         label = event_data.get("label", "object")
+        sub_label = event_data.get("sub_label")
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
 
-        title = f"{label.title()} on {camera}" if camera else f"{label.title()} detected"
+        display_label = label.title()
+        sub_label_is_identity = False
+        if sub_label and str(sub_label).strip():
+            cleaned_sub = str(sub_label).strip()
+            if self._is_modifier_sub_label(cleaned_sub):
+                display_label = f"{display_label} {self._format_sub_label(cleaned_sub)}"
+            else:
+                sub_label_is_identity = True
+                display_label = self._format_sub_label(cleaned_sub)
+
+        title = f"{display_label} on {camera}" if camera else f"{display_label} detected"
 
         body_parts = []
+        if sub_label_is_identity:
+            body_parts.append(label.title())
         if score:
             body_parts.append(f"Confidence: {int(score * 100)}%")
         if zones:

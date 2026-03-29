@@ -138,6 +138,11 @@ NOTIFY_EVENT_TYPES: Final = ["new", "update", "end"]
 DEFAULT_NOTIFICATION_TITLE: Final = "Frigate Alert"
 DEFAULT_COOLDOWN_SECONDS: Final = 60
 
+# Cross-camera deduplication
+CONF_CAMERA_GROUPS: Final = "camera_groups"
+CONF_CROSS_CAMERA_COOLDOWN: Final = "cross_camera_cooldown_seconds"
+DEFAULT_CROSS_CAMERA_COOLDOWN: Final = 120
+
 # Storage keys
 STORAGE_KEY: Final = f"{DOMAIN}.storage"
 STORAGE_VERSION: Final = 1

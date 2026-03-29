@@ -18,7 +18,10 @@ from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_CAMERA_GROUPS,
+    CONF_CROSS_CAMERA_COOLDOWN,
     CONF_DEBUG_LOGGING,
+    DEFAULT_CROSS_CAMERA_COOLDOWN,
     DOMAIN,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
@@ -525,6 +528,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             menu_options={
                 "connection_settings": "Connection Settings",
                 "notification_settings": "Notification Settings",
+                "camera_groups": "Camera Groups",
                 "device_notification_settings_select": "Device Notification Rules",
                 "diagnostics": "Diagnostics",
                 "device_management": "Manage Devices",
@@ -625,6 +629,85 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
             ),
         )
 
+    @staticmethod
+    def _serialize_camera_groups(groups: dict[str, list[str]]) -> str:
+        """Serialize camera groups dict to multi-line text (group: cam1, cam2)."""
+        if not groups:
+            return ""
+        lines = []
+        for name, cameras in sorted(groups.items()):
+            lines.append(f"{name}: {', '.join(cameras)}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_camera_groups(text: str) -> dict[str, list[str]]:
+        """Parse multi-line text into camera groups dict."""
+        groups: dict[str, list[str]] = {}
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+            name, cameras_str = line.split(":", 1)
+            name = name.strip()
+            if not name:
+                continue
+            cameras = [c.strip() for c in cameras_str.split(",") if c.strip()]
+            if cameras:
+                groups[name] = cameras
+        return groups
+
+    async def async_step_camera_groups(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure camera groups for cross-camera notification deduplication."""
+        if user_input is not None:
+            groups = self._parse_camera_groups(
+                user_input.get("camera_groups_text", "")
+            )
+            cooldown = int(
+                user_input.get(
+                    CONF_CROSS_CAMERA_COOLDOWN, DEFAULT_CROSS_CAMERA_COOLDOWN
+                )
+            )
+            return self.async_create_entry(
+                title="",
+                data=self._merged_options(
+                    {
+                        CONF_CAMERA_GROUPS: groups,
+                        CONF_CROSS_CAMERA_COOLDOWN: cooldown,
+                    }
+                ),
+            )
+
+        current_groups = self.config_entry.options.get(CONF_CAMERA_GROUPS, {})
+        current_cooldown = self.config_entry.options.get(
+            CONF_CROSS_CAMERA_COOLDOWN, DEFAULT_CROSS_CAMERA_COOLDOWN
+        )
+
+        return self.async_show_form(
+            step_id="camera_groups",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "camera_groups_text",
+                        default=self._serialize_camera_groups(current_groups),
+                    ): selector.TextSelector(
+                        selector.TextSelectorConfig(multiline=True)
+                    ),
+                    vol.Optional(
+                        CONF_CROSS_CAMERA_COOLDOWN,
+                        default=current_cooldown,
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=30,
+                            max=600,
+                            mode=selector.NumberSelectorMode.BOX,
+                        )
+                    ),
+                }
+            ),
+        )
+
     async def async_step_device_notification_settings_select(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -710,6 +793,7 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     "include_snapshot": user_input.get("include_snapshot", False),
                     "include_actions": user_input.get("include_actions", True),
                     "include_gif_preview": user_input.get("include_gif_preview", False),
+                    "cross_camera_dedup_enabled": user_input.get("cross_camera_dedup_enabled", True),
                 }
             }
 
@@ -845,6 +929,10 @@ class FrigateNotifyBridgeOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         "include_gif_preview",
                         default=settings.get("include_gif_preview", False),
+                    ): selector.BooleanSelector(),
+                    vol.Optional(
+                        "cross_camera_dedup_enabled",
+                        default=settings.get("cross_camera_dedup_enabled", True),
                     ): selector.BooleanSelector(),
                 }
             ),
