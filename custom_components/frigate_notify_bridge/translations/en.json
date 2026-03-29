@@ -79,6 +79,7 @@
         "menu_options": {
           "connection_settings": "Connection Settings",
           "notification_settings": "Notification Settings",
+          "camera_groups": "Camera Groups",
           "device_notification_settings_select": "Device Notification Rules",
           "diagnostics": "Diagnostics",
           "device_management": "Manage Devices",
@@ -101,6 +102,14 @@
           "cooldown_seconds": "Cooldown between notifications (seconds)",
           "include_thumbnail": "Include thumbnail in notifications",
           "include_snapshot": "Include full snapshot in notifications"
+        }
+      },
+      "camera_groups": {
+        "title": "Camera Groups",
+        "description": "Group cameras with overlapping coverage to suppress duplicate notifications for the same object. Enter one group per line: group_name: camera1, camera2, camera3",
+        "data": {
+          "camera_groups_text": "Camera groups (one per line)",
+          "cross_camera_cooldown_seconds": "Cross-camera cooldown (seconds)"
         }
       },
       "device_notification_settings_select": {
@@ -131,7 +140,8 @@
           "include_thumbnail": "Include thumbnail image",
           "include_snapshot": "Include full snapshot image",
           "include_actions": "Include notification action buttons",
-          "include_gif_preview": "Include GIF preview when available"
+          "include_gif_preview": "Include GIF preview when available",
+          "cross_camera_dedup_enabled": "Suppress duplicate notifications from grouped cameras"
         }
       },
       "diagnostics": {

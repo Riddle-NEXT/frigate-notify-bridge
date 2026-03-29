@@ -46,6 +46,7 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "include_snapshot": False,
     "include_actions": True,
     "include_gif_preview": False,
+    "cross_camera_dedup_enabled": True,
 }
 
 ALLOWED_EVENT_KINDS = {"alert", "detection", "recording"}
@@ -558,6 +559,19 @@ class DeviceManager:
             return False
         return device.get("ha_user_id") == user_id
 
+    @staticmethod
+    def _find_camera_group(
+        camera: str | None,
+        groups: dict[str, list[str]],
+    ) -> str | None:
+        """Return the group name a camera belongs to, or None."""
+        if not camera or not groups:
+            return None
+        for group_name, cameras in groups.items():
+            if camera in cameras:
+                return group_name
+        return None
+
     async def async_get_devices_for_notification(
         self,
         kind: str,
@@ -567,6 +581,8 @@ class DeviceManager:
         zones: list[str] | None = None,
         confidence: float | int | None = None,
         cooldown_key: str | None = None,
+        camera_groups: dict[str, list[str]] | None = None,
+        cross_camera_cooldown_seconds: int = 120,
     ) -> list[dict[str, Any]]:
         """Get devices that should receive a notification based on filters."""
         devices_to_notify = []
@@ -681,6 +697,28 @@ class DeviceManager:
                 ):
                     continue
                 self._cooldowns[device_cooldown_key] = now
+
+            # Cross-camera deduplication: suppress notifications for the same
+            # label from cameras in the same group within a cooldown window.
+            if (
+                camera_groups
+                and settings.get("cross_camera_dedup_enabled", True)
+            ):
+                group_name = self._find_camera_group(camera, camera_groups)
+                if group_name:
+                    xgroup_key = (
+                        f"{device['id']}:{normalized_kind}:xgroup:"
+                        f"{group_name}:{label or ''}"
+                    )
+                    last_group_sent = self._cooldowns.get(xgroup_key)
+                    if (
+                        last_group_sent
+                        and cross_camera_cooldown_seconds > 0
+                        and (now - last_group_sent).total_seconds()
+                        < cross_camera_cooldown_seconds
+                    ):
+                        continue
+                    self._cooldowns[xgroup_key] = now
 
             devices_to_notify.append(device)
 

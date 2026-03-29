@@ -25,6 +25,7 @@ class NotificationPayload:
     event_id: str | None = None
     camera: str | None = None
     label: str | None = None
+    sub_label: str | None = None
     zones: list[str] | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +51,8 @@ class NotificationPayload:
             result["camera"] = self.camera
         if self.label:
             result["label"] = self.label
+        if self.sub_label:
+            result["sub_label"] = self.sub_label
         if self.zones:
             result["zones"] = self.zones
         return result
