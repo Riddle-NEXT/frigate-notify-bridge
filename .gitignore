@@ -67,3 +67,5 @@ test_device_flow.py
 
 # Build artifacts
 *.zip
+hacs_release_*/
+release_build_*/
