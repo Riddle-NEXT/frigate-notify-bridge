@@ -23,8 +23,14 @@ class Config:
     mqtt_password: str = ""
     mqtt_topic_prefix: str = "frigate"
 
-    # Push provider
-    push_provider: str = "fcm"  # fcm, ntfy, pushover
+    # Push provider: relay, fcm, ntfy, pushover
+    push_provider: str = "fcm"
+
+    # Relay configuration (PUSH_PROVIDER=relay)
+    relay_url: str = ""
+    relay_bridge_id: str = ""
+    relay_bridge_secret: str = ""
+    relay_e2e_key: str = ""  # 32-byte AES key, hex-encoded
 
     # FCM configuration
     fcm_credentials_file: str = "/config/firebase-credentials.json"
@@ -43,6 +49,9 @@ class Config:
     api_port: int = 8199
     external_url: str = ""
 
+    # Admin token for bridge management API (separate from device API tokens)
+    admin_token: str = ""
+
     # Data directory
     data_dir: Path = field(default_factory=lambda: Path("/config"))
 
@@ -56,7 +65,18 @@ class Config:
         if not self.mqtt_host:
             errors.append("MQTT_HOST is required")
 
-        if self.push_provider == "fcm":
+        if self.push_provider == "relay":
+            if not self.relay_url:
+                errors.append("RELAY_URL is required for relay provider")
+            if not self.relay_bridge_id:
+                errors.append("RELAY_BRIDGE_ID is required for relay provider")
+            if not self.relay_bridge_secret:
+                errors.append("RELAY_BRIDGE_SECRET is required for relay provider")
+            if not self.relay_e2e_key:
+                errors.append("RELAY_E2E_KEY is required for relay provider")
+            elif len(bytes.fromhex(self.relay_e2e_key)) != 32:
+                errors.append("RELAY_E2E_KEY must be a 64-character hex string (32 bytes)")
+        elif self.push_provider == "fcm":
             if not self.fcm_credentials and not Path(self.fcm_credentials_file).exists():
                 errors.append(
                     f"FCM credentials file not found: {self.fcm_credentials_file}"
@@ -71,6 +91,11 @@ class Config:
                 )
 
         return errors
+
+    @property
+    def relay_e2e_key_bytes(self) -> bytes:
+        """Return relay E2E key as raw bytes."""
+        return bytes.fromhex(self.relay_e2e_key) if self.relay_e2e_key else b""
 
 
 def load_config() -> Config:
@@ -88,6 +113,11 @@ def load_config() -> Config:
         mqtt_topic_prefix=os.environ.get("MQTT_TOPIC_PREFIX", "frigate"),
         # Push provider
         push_provider=os.environ.get("PUSH_PROVIDER", "fcm").lower(),
+        # Relay
+        relay_url=os.environ.get("RELAY_URL", "").rstrip("/"),
+        relay_bridge_id=os.environ.get("RELAY_BRIDGE_ID", ""),
+        relay_bridge_secret=os.environ.get("RELAY_BRIDGE_SECRET", ""),
+        relay_e2e_key=os.environ.get("RELAY_E2E_KEY", ""),
         # FCM
         fcm_credentials_file=os.environ.get(
             "FCM_CREDENTIALS_FILE", "/config/firebase-credentials.json"
@@ -102,11 +132,13 @@ def load_config() -> Config:
         # Server
         api_port=int(os.environ.get("API_PORT", "8199")),
         external_url=os.environ.get("EXTERNAL_URL", ""),
+        # Admin
+        admin_token=os.environ.get("ADMIN_TOKEN", ""),
         # Data
         data_dir=Path(os.environ.get("DATA_DIR", "/config")),
     )
 
-    # Load FCM credentials from file if exists
+    # Load FCM credentials from file if using FCM
     if config.push_provider == "fcm":
         creds_path = Path(config.fcm_credentials_file)
         if creds_path.exists():

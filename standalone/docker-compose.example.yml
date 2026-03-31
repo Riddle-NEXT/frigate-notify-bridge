@@ -1,5 +1,5 @@
 # Example Docker Compose for Frigate Notify Bridge (Standalone)
-# Use this if you don't have Home Assistant
+# For users without Home Assistant
 
 version: "3.8"
 
@@ -23,25 +23,37 @@ services:
       # MQTT_PASSWORD: ""
       MQTT_TOPIC_PREFIX: "frigate"
 
-      # Push notification provider (choose one: fcm, ntfy, pushover)
-      PUSH_PROVIDER: "fcm"
+      # Push notification provider (choose one):
+      # Option A: Push Relay (recommended for Frigate Mobile app users)
+      #   - End-to-end encrypted, no Firebase credentials required on your end
+      #   - Get RELAY_BRIDGE_ID, RELAY_BRIDGE_SECRET, and RELAY_E2E_KEY during bridge setup
+      PUSH_PROVIDER: "relay"
+      RELAY_URL: "https://push.frigate-mobile.app"
+      RELAY_BRIDGE_ID: "your-bridge-id"
+      RELAY_BRIDGE_SECRET: "your-bridge-secret"
+      RELAY_E2E_KEY: "64-character-hex-encoded-32-byte-key"  # openssl rand -hex 32
 
-      # For FCM: Mount your Firebase credentials file
-      FCM_CREDENTIALS_FILE: "/config/firebase-credentials.json"
+      # Option B: FCM (direct Firebase — requires your own Firebase project)
+      # PUSH_PROVIDER: "fcm"
+      # FCM_CREDENTIALS_FILE: "/config/firebase-credentials.json"
 
-      # For ntfy (alternative to FCM):
+      # Option C: ntfy
       # PUSH_PROVIDER: "ntfy"
       # NTFY_URL: "https://ntfy.sh"
       # NTFY_TOPIC: "my-frigate-alerts"
       # NTFY_TOKEN: ""  # Optional: for authenticated topics
 
-      # For Pushover (alternative to FCM):
+      # Option D: Pushover
       # PUSH_PROVIDER: "pushover"
       # PUSHOVER_USER_KEY: "your_user_key"
       # PUSHOVER_API_TOKEN: "your_api_token"
 
       # Optional: External URL for remote access pairing
       # EXTERNAL_URL: "https://your-domain.com:8199"
+
+      # Admin token for Bridge Manager screen in the Frigate Mobile app
+      # Generate with: openssl rand -hex 24
+      # ADMIN_TOKEN: ""
 
       # Logging
       LOG_LEVEL: "INFO"

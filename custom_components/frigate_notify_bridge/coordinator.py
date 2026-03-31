@@ -23,6 +23,8 @@ from .const import (
     DEFAULT_CROSS_CAMERA_COOLDOWN,
     DEFAULT_NOTIFICATION_TITLE,
 )
+import json as _json
+
 from .issues import ISSUE_NOTIFICATION_DELIVERY
 from .push_providers.base import NotificationPayload, SendResult
 
@@ -99,6 +101,7 @@ class FrigateNotifyCoordinator:
         self._frigate_url = entry.data.get(CONF_FRIGATE_URL)
         self._frigate_auth: tuple[str, str] | None = None
         self._frigate_api_token: str | None = None
+        self.last_event_at: str | None = None
 
         # Set up Frigate auth if configured
         username = entry.data.get(CONF_FRIGATE_USERNAME)
@@ -120,6 +123,8 @@ class FrigateNotifyCoordinator:
                 - has_clip: Whether clip is available
                 - has_snapshot: Whether snapshot is available
         """
+        self.last_event_at = datetime.now().isoformat()
+
         event_id = event_data.get("event_id")
         review_id = event_data.get("review_id")
         camera = event_data.get("camera")
@@ -191,8 +196,11 @@ class FrigateNotifyCoordinator:
             _LOGGER.debug("No device targets available for notification")
             return
 
-        # Increment alert counts for successful sends
+        # Record delivery results and increment alert counts for successful sends
         for device, result in zip(notified_devices, results):
+            await self.device_manager.async_record_delivery_result(
+                device["id"], result.success, result.error
+            )
             if result.success:
                 await self.device_manager.async_increment_alert_count(device["id"])
 
@@ -229,11 +237,12 @@ class FrigateNotifyCoordinator:
                 failed_devices=failed_device_names,
                 reason=first_error,
                 send_alert=(
-                    (lambda issue_id, title, body: self._async_send_issue_alert(
+                    (lambda issue_id, title, body, **kwargs: self._async_send_issue_alert(
                         successful_devices,
                         issue_id,
                         title,
                         body,
+                        **kwargs,
                     ))
                     if successful_devices
                     else None
@@ -752,19 +761,43 @@ class FrigateNotifyCoordinator:
         issue_id: str,
         title: str,
         body: str,
+        *,
+        issue_type: str | None = None,
+        affected_devices: list[str] | None = None,
+        error_code: str | None = None,
+        error_detail: str | None = None,
+        suggested_action: str | None = None,
     ) -> None:
-        """Send a minimal bridge-attention alert to devices that still work."""
+        """Send a bridge-attention alert with enriched error data to devices that still work."""
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
+
+        # Build enriched data payload (capped for FCM 4KB limit)
+        data: dict[str, Any] = {
+            "type": "bridge_issue",
+            "issue_id": issue_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        if issue_type:
+            data["issue_type"] = issue_type
+        if affected_devices:
+            # Cap at 3 device names, with truncation indicator
+            capped = affected_devices[:3]
+            if len(affected_devices) > 3:
+                capped.append(f"and {len(affected_devices) - 3} more")
+            data["affected_devices"] = _json.dumps(capped)
+        if error_code:
+            data["error_code"] = error_code
+        if error_detail:
+            data["error_detail"] = error_detail[:200]
+        if suggested_action:
+            data["suggested_action"] = suggested_action
+
         payload = NotificationPayload(
             title=title,
             body=body,
-            data={
-                "type": "bridge_issue",
-                "issue_id": issue_id,
-                "timestamp": datetime.utcnow().isoformat(),
-            },
+            data=data,
             priority="high",
         )
 

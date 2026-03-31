@@ -23,6 +23,8 @@ from .const import (
     API_BASE_PATH,
     API_FRIGATE_PROXY_PATH,
     API_MEDIA_PROXY_PATH,
+    API_ISSUES_PATH,
+    API_ISSUE_DISMISS_PATH,
     CONF_FRIGATE_URL,
     CONF_FRIGATE_USERNAME,
     CONF_FRIGATE_PASSWORD,
@@ -44,6 +46,7 @@ from .qr_generator import (
 if TYPE_CHECKING:
     from .coordinator import FrigateNotifyCoordinator
     from .device_manager import DeviceManager
+    from .issues import BridgeIssueManager
 
 _LOGGER = logging.getLogger(__name__)
 _SAMPLE_NOTIFICATION_IMAGE_ID = "bridge_sample_alert"
@@ -131,6 +134,7 @@ async def async_setup_api(
     entry: ConfigEntry,
     coordinator: FrigateNotifyCoordinator,
     device_manager: DeviceManager,
+    issue_manager: BridgeIssueManager | None = None,
 ) -> None:
     """Set up the REST API endpoints."""
     hass.http.register_view(PairingQRView(entry, coordinator, device_manager))
@@ -139,12 +143,15 @@ async def async_setup_api(
     hass.http.register_view(DeviceView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceTokenView(entry, coordinator, device_manager))
     hass.http.register_view(ConfigView(entry, coordinator, device_manager))
-    hass.http.register_view(StatusView(entry, coordinator, device_manager))
+    hass.http.register_view(StatusView(entry, coordinator, device_manager, issue_manager=issue_manager))
     hass.http.register_view(TestNotificationView(entry, coordinator, device_manager))
     hass.http.register_view(WebRTCCredentialsView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateProxyView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateMediaView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateCredentialsView(entry, coordinator, device_manager))
+    if issue_manager is not None:
+        hass.http.register_view(IssuesView(entry, coordinator, device_manager, issue_manager=issue_manager))
+        hass.http.register_view(IssueDismissView(entry, coordinator, device_manager, issue_manager=issue_manager))
 
     _LOGGER.info("Frigate Notify Bridge API endpoints registered")
 
@@ -485,6 +492,10 @@ class DevicesView(BaseAPIView):
                 "subscription_last_verified_at": device.get("subscription_last_verified_at"),
                 "paired_at": device["paired_at"],
                 "last_seen": device.get("last_seen"),
+                "last_notification_at": device.get("last_notification_at"),
+                "last_failure_at": device.get("last_failure_at"),
+                "failure_count_today": device.get("failure_count_today", 0),
+                "last_error": device.get("last_error"),
             }
 
         return web.json_response({
@@ -689,6 +700,18 @@ class StatusView(BaseAPIView):
     url = f"{API_BASE_PATH}/status"
     name = "api:frigate_notify_bridge:status"
 
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        coordinator: FrigateNotifyCoordinator,
+        device_manager: DeviceManager,
+        *,
+        issue_manager: BridgeIssueManager | None = None,
+    ) -> None:
+        """Initialize the view."""
+        super().__init__(entry, coordinator, device_manager)
+        self._issue_manager = issue_manager
+
     async def get(self, request: web.Request) -> web.Response:
         """Get bridge status.
 
@@ -704,12 +727,80 @@ class StatusView(BaseAPIView):
         if device_id:
             _LOGGER.debug("Returning authenticated status to device %s", device_id)
             devices = await self.device_manager.async_get_devices()
+            provider_initialized = self.coordinator.push_provider.is_initialized
             base["push_provider"] = {
                 "name": self.coordinator.push_provider.name,
-                "initialized": self.coordinator.push_provider.is_initialized,
+                "initialized": provider_initialized,
             }
+            base["push_provider_status"] = (
+                f"{self.coordinator.push_provider.name}/available"
+                if provider_initialized
+                else f"{self.coordinator.push_provider.name}/unavailable"
+            )
+            base["mqtt_connected"] = bool(self.coordinator.last_event_at is not None)
+            base["last_event_at"] = self.coordinator.last_event_at
+            base["active_issue_count"] = (
+                len(self._issue_manager.active_issues)
+                if self._issue_manager is not None
+                else 0
+            )
+            base["device_count"] = len(devices)
             base["devices_count"] = len(devices)
+            base["device_failure_count"] = sum(
+                1 for d in devices.values() if d.get("last_error") is not None
+            )
         return web.json_response(base)
+
+
+class IssuesView(BaseAPIView):
+    """List active bridge issues."""
+
+    url = f"{API_BASE_PATH}/{API_ISSUES_PATH}"
+    name = "api:frigate_notify_bridge:issues"
+    requires_auth = True
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        coordinator: FrigateNotifyCoordinator,
+        device_manager: DeviceManager,
+        *,
+        issue_manager: BridgeIssueManager,
+    ) -> None:
+        """Initialize the view."""
+        super().__init__(entry, coordinator, device_manager)
+        self._issue_manager = issue_manager
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Return active issues."""
+        return web.json_response({
+            "issues": self._issue_manager.active_issues,
+        })
+
+
+class IssueDismissView(BaseAPIView):
+    """Dismiss a specific bridge issue."""
+
+    url = f"{API_BASE_PATH}/{API_ISSUES_PATH}/{{issue_id}}/{API_ISSUE_DISMISS_PATH}"
+    name = "api:frigate_notify_bridge:issue_dismiss"
+    requires_auth = True
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        coordinator: FrigateNotifyCoordinator,
+        device_manager: DeviceManager,
+        *,
+        issue_manager: BridgeIssueManager,
+    ) -> None:
+        """Initialize the view."""
+        super().__init__(entry, coordinator, device_manager)
+        self._issue_manager = issue_manager
+
+    async def post(self, request: web.Request, issue_id: str) -> web.Response:
+        """Dismiss an issue by ID."""
+        await self._issue_manager.async_dismiss_issue(issue_id)
+        return web.json_response({"ok": True})
 
 
 class TestNotificationView(BaseAPIView):

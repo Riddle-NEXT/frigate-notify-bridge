@@ -1,11 +1,11 @@
 """Frigate Notify Bridge - Standalone server main entry point."""
 
 import asyncio
-import json
 import logging
 import os
 import signal
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ from .config import Config, load_config
 from .mqtt_client import FrigateMQTTClient
 from .push_service import PushService
 from .device_store import DeviceStore
+from .issue_manager import StandaloneIssueManager
 from .api import setup_routes
 
 # Set up logging
@@ -24,49 +25,55 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Failure threshold before raising an issue (failures today across all devices)
+_FAILURE_THRESHOLD = 3
+
 
 class FrigateNotifyBridge:
     """Main application class for standalone Frigate Notify Bridge."""
 
     def __init__(self, config: Config) -> None:
-        """Initialize the bridge."""
         self.config = config
         self.app: web.Application | None = None
         self.mqtt_client: FrigateMQTTClient | None = None
         self.push_service: PushService | None = None
         self.device_store: DeviceStore | None = None
+        self.issue_manager: StandaloneIssueManager | None = None
         self._shutdown_event = asyncio.Event()
+        self._last_event_at: str | None = None
+        self._mqtt_connected: bool = False
 
     async def start(self) -> None:
-        """Start the bridge."""
         logger.info("Starting Frigate Notify Bridge v0.1.0")
 
-        # Initialize device store
+        # Initialize subsystems
         self.device_store = DeviceStore(self.config.data_dir)
         await self.device_store.load()
 
-        # Initialize push service
+        self.issue_manager = StandaloneIssueManager()
+
         self.push_service = PushService(self.config)
         if not await self.push_service.initialize():
             logger.error("Failed to initialize push service")
             sys.exit(1)
 
-        # Initialize MQTT client
         self.mqtt_client = FrigateMQTTClient(
             config=self.config,
             on_event=self._handle_frigate_event,
         )
 
-        # Create web application
+        # Build web app
         self.app = web.Application()
         self.app["config"] = self.config
         self.app["device_store"] = self.device_store
         self.app["push_service"] = self.push_service
+        self.app["issue_manager"] = self.issue_manager
+        self.app["mqtt_connected"] = False
+        self.app["last_event_at"] = None
 
-        # Set up API routes
         setup_routes(self.app)
 
-        # Start MQTT client
+        # Start MQTT
         await self.mqtt_client.start()
 
         # Start web server
@@ -78,14 +85,10 @@ class FrigateNotifyBridge:
         logger.info("API server listening on port %d", self.config.api_port)
         logger.info("Frigate Notify Bridge started successfully")
 
-        # Wait for shutdown signal
         await self._shutdown_event.wait()
-
-        # Cleanup
         await self.stop()
 
     async def stop(self) -> None:
-        """Stop the bridge."""
         logger.info("Shutting down Frigate Notify Bridge")
 
         if self.mqtt_client:
@@ -100,7 +103,6 @@ class FrigateNotifyBridge:
         logger.info("Frigate Notify Bridge stopped")
 
     def request_shutdown(self) -> None:
-        """Request graceful shutdown."""
         self._shutdown_event.set()
 
     async def _handle_frigate_event(self, event_data: dict[str, Any]) -> None:
@@ -110,14 +112,14 @@ class FrigateNotifyBridge:
         label = event_data.get("label")
         zones = event_data.get("zones", [])
 
-        logger.debug(
-            "Processing event: %s (camera=%s, label=%s)",
-            event_id,
-            camera,
-            label,
-        )
+        logger.debug("Processing event: %s (camera=%s, label=%s)", event_id, camera, label)
 
-        # Get devices that should receive this notification
+        # Track last event time for status endpoint
+        self._last_event_at = datetime.utcnow().isoformat()
+        if self.app:
+            self.app["last_event_at"] = self._last_event_at
+
+        # Get devices for this notification
         devices = await self.device_store.get_devices_for_notification(
             camera=camera,
             label=label,
@@ -128,51 +130,71 @@ class FrigateNotifyBridge:
             logger.debug("No devices to notify for event %s", event_id)
             return
 
-        # Build notification
         notification = self._build_notification(event_data)
 
-        # Get FCM tokens
-        fcm_tokens = [
-            device.get("fcm_token")
+        # Build (device_id, push_token) pairs so we can record delivery results per device
+        device_pairs = [
+            (device["id"], device.get("fcm_token"))
             for device in devices
             if device.get("fcm_token")
         ]
 
-        if not fcm_tokens:
-            logger.debug("No FCM tokens available")
+        if not device_pairs:
+            logger.debug("No push tokens available for event %s", event_id)
             return
 
-        # Send notifications
-        logger.info(
-            "Sending notification to %d devices for event %s",
-            len(fcm_tokens),
-            event_id,
-        )
+        logger.info("Sending notification to %d devices for event %s", len(device_pairs), event_id)
 
-        results = await self.push_service.send_to_many(fcm_tokens, notification)
+        # Send and record per-device results
+        for device_id, push_token in device_pairs:
+            result = await self.push_service.send(push_token, notification)
+            await self.device_store.record_delivery_result(
+                device_id=device_id,
+                success=result.get("success", False),
+                error=result.get("error"),
+            )
 
-        success_count = sum(1 for r in results if r.get("success"))
-        logger.info(
-            "Notification results: %d success, %d failure",
-            success_count,
-            len(results) - success_count,
-        )
+        # Check failure state and raise/clear issues
+        await self._check_delivery_health()
+
+    async def _check_delivery_health(self) -> None:
+        """Raise or clear delivery issues based on current failure counts."""
+        devices = await self.device_store.get_all_devices()
+        failing_devices = [
+            d for d in devices.values()
+            if d.get("failure_count_today", 0) >= _FAILURE_THRESHOLD
+        ]
+
+        if failing_devices:
+            affected_names = [d.get("name", d["id"]) for d in failing_devices[:3]]
+            count = len(failing_devices)
+            self.issue_manager.raise_issue(
+                issue_type="notification_delivery_failures",
+                title=f"Notification delivery failures ({count} device{'s' if count > 1 else ''})",
+                description=(
+                    f"Delivery has failed {_FAILURE_THRESHOLD}+ times today for: "
+                    + ", ".join(affected_names)
+                ),
+                severity="warning",
+                affected_devices=affected_names,
+                error_code="DELIVERY_FAILURE",
+                error_detail=failing_devices[0].get("last_error"),
+                suggested_action="Check push provider credentials or re-pair affected devices",
+                fingerprint="notification_delivery_failures",
+            )
+        else:
+            self.issue_manager.clear_issues_for_type("notification_delivery_failures")
 
     @staticmethod
     def _format_sub_label(raw: str) -> str:
-        """Format a sub_label for display."""
         return raw.replace("_", " ").replace("-", " ").strip().title()
 
     @staticmethod
     def _is_modifier_sub_label(sub_label: str) -> bool:
-        """Check if a sub_label is a modifier rather than an identity."""
         lower = sub_label.lower().strip()
-        return lower.startswith("with") or lower in {
-            "package", "bicycle", "pet", "vehicle",
-        }
+        return lower.startswith("with") or lower in {"package", "bicycle", "pet", "vehicle"}
 
     def _build_notification(self, event_data: dict[str, Any]) -> dict[str, Any]:
-        """Build notification payload from event data."""
         event_id = event_data.get("event_id")
         camera = event_data.get("camera", "Unknown")
         label = event_data.get("label", "object")
@@ -202,7 +224,6 @@ class FrigateNotifyBridge:
 
         body = " · ".join(body_parts) if body_parts else f"Motion detected on {camera}"
 
-        # Build image URLs
         thumbnail_url = None
         if self.config.frigate_url and event_id:
             thumbnail_url = f"{self.config.frigate_url}/api/events/{event_id}/thumbnail.jpg"
@@ -224,14 +245,9 @@ class FrigateNotifyBridge:
 
 
 def main() -> None:
-    """Main entry point."""
-    # Load configuration
     config = load_config()
-
-    # Create bridge
     bridge = FrigateNotifyBridge(config)
 
-    # Set up signal handlers
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 

@@ -128,7 +128,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await mqtt_listener.async_start()
 
     # Set up REST API endpoints
-    await async_setup_api(hass, entry, coordinator, device_manager)
+    await async_setup_api(hass, entry, coordinator, device_manager, issue_manager=issue_manager)
 
     # Register device in Home Assistant device registry
     device_registry = dr.async_get(hass)

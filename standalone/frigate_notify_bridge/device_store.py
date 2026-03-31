@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class DeviceStore:
-    """Simple file-based device storage."""
+    """Simple file-based device storage with delivery tracking."""
 
     def __init__(self, data_dir: Path) -> None:
         """Initialize device store."""
@@ -83,7 +83,6 @@ class DeviceStore:
         return pairing_data
 
     def _cleanup_pairing(self, pairing_data: dict[str, Any]) -> None:
-        """Remove pairing data."""
         code = pairing_data.get("code")
         token = pairing_data.get("token")
         if code:
@@ -104,7 +103,7 @@ class DeviceStore:
         device_id = secrets.token_urlsafe(16)
         api_token = secrets.token_urlsafe(32)
 
-        device = {
+        device: dict[str, Any] = {
             "id": device_id,
             "name": device_info.get("name", "Unknown Device"),
             "platform": device_info.get("platform", "unknown"),
@@ -120,6 +119,12 @@ class DeviceStore:
                 "zones": [],
                 "cooldown_seconds": 60,
             },
+            # Delivery tracking fields
+            "last_notification_at": None,
+            "last_failure_at": None,
+            "failure_count_today": 0,
+            "failure_count_date": None,
+            "last_error": None,
         }
 
         self._devices[device_id] = device
@@ -133,11 +138,9 @@ class DeviceStore:
         }
 
     async def get_device(self, device_id: str) -> dict[str, Any] | None:
-        """Get a device by ID."""
         return self._devices.get(device_id)
 
     async def get_all_devices(self) -> dict[str, dict[str, Any]]:
-        """Get all devices."""
         return self._devices.copy()
 
     async def update_device(
@@ -165,20 +168,52 @@ class DeviceStore:
         return device
 
     async def remove_device(self, device_id: str) -> bool:
-        """Remove a device."""
         if device_id not in self._devices:
             return False
-
         del self._devices[device_id]
         await self.save()
         return True
 
+    async def record_delivery_result(
+        self,
+        device_id: str,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        """Record a delivery result for a device (mirrors HA device_manager behaviour)."""
+        device = self._devices.get(device_id)
+        if not device:
+            return
+
+        now = datetime.utcnow()
+        today = now.strftime("%Y-%m-%d")
+
+        if success:
+            device["last_notification_at"] = now.isoformat()
+            device["last_error"] = None
+        else:
+            device["last_failure_at"] = now.isoformat()
+            device["last_error"] = error
+
+            # Reset daily count on date rollover
+            if device.get("failure_count_date") != today:
+                device["failure_count_today"] = 0
+                device["failure_count_date"] = today
+
+            device["failure_count_today"] = device.get("failure_count_today", 0) + 1
+
+        await self.save()
+
     def validate_api_token(self, api_token: str) -> str | None:
-        """Validate API token and return device ID."""
+        """Validate a device API token and return device ID."""
         for device_id, device in self._devices.items():
             if device.get("api_token") == api_token:
                 return device_id
         return None
+
+    def validate_admin_token(self, token: str, admin_token: str) -> bool:
+        """Validate an admin token for bridge management endpoints."""
+        return bool(admin_token) and secrets.compare_digest(token, admin_token)
 
     async def get_devices_for_notification(
         self,
@@ -195,17 +230,14 @@ class DeviceStore:
             if not settings.get("enabled", True):
                 continue
 
-            # Check camera filter
             allowed_cameras = settings.get("cameras", [])
             if allowed_cameras and camera and camera not in allowed_cameras:
                 continue
 
-            # Check label filter
             allowed_labels = settings.get("labels", [])
             if allowed_labels and label and label not in allowed_labels:
                 continue
 
-            # Check zone filter
             allowed_zones = settings.get("zones", [])
             if allowed_zones and zone and zone not in allowed_zones:
                 continue
