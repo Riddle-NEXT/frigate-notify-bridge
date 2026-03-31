@@ -480,10 +480,12 @@ class DevicesView(BaseAPIView):
         """List all paired devices (admin only)."""
         devices = await self.device_manager.async_get_devices()
 
-        # Remove sensitive data from response
-        safe_devices = {}
+        # Remove sensitive data from response; return as list (not dict) so
+        # the mobile app can parse it uniformly with the standalone API.
+        safe_devices = []
         for device_id, device in devices.items():
-            safe_devices[device_id] = {
+            safe_devices.append({
+                "device_id": device_id,
                 "id": device["id"],
                 "name": device["name"],
                 "platform": device["platform"],
@@ -496,7 +498,7 @@ class DevicesView(BaseAPIView):
                 "last_failure_at": device.get("last_failure_at"),
                 "failure_count_today": device.get("failure_count_today", 0),
                 "last_error": device.get("last_error"),
-            }
+            })
 
         return web.json_response({
             "devices": safe_devices,
