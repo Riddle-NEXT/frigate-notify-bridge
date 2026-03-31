@@ -739,7 +739,7 @@ class StatusView(BaseAPIView):
                 if provider_initialized
                 else f"{self.coordinator.push_provider.name}/unavailable"
             )
-            base["mqtt_connected"] = bool(self.coordinator.last_event_at is not None)
+            base["mqtt_connected"] = bool(self.coordinator.mqtt_subscribed)
             base["last_event_at"] = self.coordinator.last_event_at
             base["active_issue_count"] = (
                 len(self._issue_manager.active_issues)
