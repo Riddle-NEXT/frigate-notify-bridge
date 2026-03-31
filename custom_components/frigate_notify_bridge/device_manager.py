@@ -393,6 +393,11 @@ class DeviceManager:
             "alert_count_today": 0,
             "alert_count_total": 0,
             "alert_count_date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "last_notification_at": None,
+            "last_failure_at": None,
+            "failure_count_today": 0,
+            "failure_count_date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "last_error": None,
         }
 
         self._devices[device_id] = device
@@ -804,3 +809,34 @@ class DeviceManager:
 
         await self.async_save()
         async_dispatcher_send(self.hass, SIGNAL_DEVICE_UPDATED, device_id)
+
+    async def async_record_delivery_result(
+        self,
+        device_id: str,
+        success: bool,
+        error: str | None = None,
+    ) -> None:
+        """Record the outcome of a push delivery attempt for a device."""
+        if device_id not in self._devices:
+            return
+
+        device = self._devices[device_id]
+        now = datetime.now().isoformat()
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+        # Always update last_notification_at on every attempt
+        device["last_notification_at"] = now
+
+        # Reset failure_count_today on date rollover
+        if device.get("failure_count_date") != today:
+            device["failure_count_today"] = 0
+            device["failure_count_date"] = today
+
+        if success:
+            device["last_error"] = None
+        else:
+            device["last_failure_at"] = now
+            device["failure_count_today"] = device.get("failure_count_today", 0) + 1
+            device["last_error"] = error
+
+        await self.async_save()

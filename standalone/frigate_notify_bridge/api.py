@@ -16,42 +16,90 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_get("/api/status", get_status)
     app.router.add_get("/api/pairing/qr", get_pairing_qr)
     app.router.add_post("/api/pair", pair_device)
+    # Device management (device API token OR admin token)
     app.router.add_get("/api/devices", list_devices)
     app.router.add_get("/api/devices/{device_id}", get_device)
     app.router.add_patch("/api/devices/{device_id}", update_device)
     app.router.add_delete("/api/devices/{device_id}", delete_device)
     app.router.add_post("/api/devices/{device_id}/token", update_token)
+    # Issues (admin token required)
+    app.router.add_get("/api/issues", list_issues)
+    app.router.add_post("/api/issues/{issue_id}/dismiss", dismiss_issue)
+    # Config and test
     app.router.add_get("/api/config", get_config)
     app.router.add_post("/api/test", test_notification)
 
 
-def _validate_api_token(request: web.Request) -> str | None:
-    """Validate API token from request."""
+def _get_bearer_token(request: web.Request) -> str | None:
+    """Extract Bearer token from Authorization header."""
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        device_store = request.app["device_store"]
-        return device_store.validate_api_token(token)
+        return auth_header[7:]
     return None
 
 
+def _validate_api_token(request: web.Request) -> str | None:
+    """Validate device API token. Returns device_id or None."""
+    token = _get_bearer_token(request)
+    if not token:
+        return None
+    device_store = request.app["device_store"]
+    return device_store.validate_api_token(token)
+
+
+def _validate_admin_token(request: web.Request) -> bool:
+    """Validate admin token. Returns True if valid."""
+    token = _get_bearer_token(request)
+    if not token:
+        return False
+    config = request.app["config"]
+    device_store = request.app["device_store"]
+    return device_store.validate_admin_token(token, config.admin_token)
+
+
+def _validate_device_or_admin(request: web.Request, device_id: str) -> bool:
+    """Return True if the request is from the device itself OR an admin."""
+    if _validate_admin_token(request):
+        return True
+    token_device_id = _validate_api_token(request)
+    return token_device_id == device_id
+
+
 async def health_check(request: web.Request) -> web.Response:
-    """Health check endpoint."""
     return web.json_response({"status": "ok"})
 
 
 async def get_status(request: web.Request) -> web.Response:
-    """Get bridge status."""
+    """Get bridge status — mirrors HA StatusView fields."""
     device_store = request.app["device_store"]
     push_service = request.app["push_service"]
+    issue_manager = request.app.get("issue_manager")
     devices = await device_store.get_all_devices()
 
-    return web.json_response({
+    # Count devices with failures today
+    device_failure_count = sum(
+        1 for d in devices.values()
+        if d.get("failure_count_today", 0) > 0
+    )
+
+    provider = push_service._provider
+    provider_initialized = provider.is_initialized if provider else False
+    provider_last_error = provider.last_error if provider else None
+
+    status: dict[str, Any] = {
         "status": "ok",
         "version": "0.1.0",
-        "push_provider": push_service._provider,
+        "push_provider": push_service._provider_name,
+        "push_provider_status": "ok" if provider_initialized else "error",
+        "push_provider_error": provider_last_error,
+        "mqtt_connected": request.app.get("mqtt_connected", False),
+        "last_event_at": request.app.get("last_event_at"),
         "devices_count": len(devices),
-    })
+        "device_failure_count": device_failure_count,
+        "active_issue_count": issue_manager.active_issue_count if issue_manager else 0,
+    }
+
+    return web.json_response(status)
 
 
 async def get_pairing_qr(request: web.Request) -> web.Response:
@@ -60,10 +108,8 @@ async def get_pairing_qr(request: web.Request) -> web.Response:
     push_service = request.app["push_service"]
     config = request.app["config"]
 
-    # Generate pairing code
     pairing_info = device_store.generate_pairing_code()
 
-    # Build QR payload
     qr_payload = {
         "v": 1,
         "t": pairing_info["token"],
@@ -91,7 +137,6 @@ async def get_pairing_qr(request: web.Request) -> web.Response:
     format_type = request.query.get("format", "json")
 
     if format_type == "data":
-        # Generate QR code image
         try:
             import qrcode
             import io
@@ -135,7 +180,6 @@ async def get_pairing_qr(request: web.Request) -> web.Response:
 
 
 async def pair_device(request: web.Request) -> web.Response:
-    """Complete device pairing."""
     device_store = request.app["device_store"]
     push_service = request.app["push_service"]
     config = request.app["config"]
@@ -158,7 +202,6 @@ async def pair_device(request: web.Request) -> web.Response:
 
     try:
         result = await device_store.complete_pairing(token_or_code, device_info)
-
         return web.json_response({
             "success": True,
             "device_id": result["device_id"],
@@ -169,38 +212,45 @@ async def pair_device(request: web.Request) -> web.Response:
                 "fcm_sender_id": push_service.get_sender_id(),
             },
         })
-
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
 
 
 async def list_devices(request: web.Request) -> web.Response:
-    """List all devices (requires auth)."""
+    """List all devices (admin token required)."""
+    if not _validate_admin_token(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
     device_store = request.app["device_store"]
     devices = await device_store.get_all_devices()
 
-    safe_devices = {}
+    device_list = []
     for device_id, device in devices.items():
-        safe_devices[device_id] = {
+        device_list.append({
             "id": device["id"],
             "name": device["name"],
             "platform": device["platform"],
             "paired_at": device["paired_at"],
             "last_seen": device.get("last_seen"),
-        }
+            "notification_enabled": device.get("notification_settings", {}).get("enabled", True),
+            # Delivery stats
+            "last_notification_at": device.get("last_notification_at"),
+            "last_failure_at": device.get("last_failure_at"),
+            "failure_count_today": device.get("failure_count_today", 0),
+            "last_error": device.get("last_error"),
+        })
 
     return web.json_response({
-        "devices": safe_devices,
-        "count": len(safe_devices),
+        "devices": device_list,
+        "count": len(device_list),
     })
 
 
 async def get_device(request: web.Request) -> web.Response:
     """Get device details."""
     device_id = request.match_info["device_id"]
-    token_device_id = _validate_api_token(request)
 
-    if token_device_id != device_id:
+    if not _validate_device_or_admin(request, device_id):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     device_store = request.app["device_store"]
@@ -214,15 +264,18 @@ async def get_device(request: web.Request) -> web.Response:
         "name": device["name"],
         "platform": device["platform"],
         "notification_settings": device.get("notification_settings", {}),
+        "last_notification_at": device.get("last_notification_at"),
+        "last_failure_at": device.get("last_failure_at"),
+        "failure_count_today": device.get("failure_count_today", 0),
+        "last_error": device.get("last_error"),
     })
 
 
 async def update_device(request: web.Request) -> web.Response:
     """Update device settings."""
     device_id = request.match_info["device_id"]
-    token_device_id = _validate_api_token(request)
 
-    if token_device_id != device_id:
+    if not _validate_device_or_admin(request, device_id):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
@@ -249,9 +302,8 @@ async def update_device(request: web.Request) -> web.Response:
 async def delete_device(request: web.Request) -> web.Response:
     """Remove/unpair device."""
     device_id = request.match_info["device_id"]
-    token_device_id = _validate_api_token(request)
 
-    if token_device_id != device_id:
+    if not _validate_device_or_admin(request, device_id):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     device_store = request.app["device_store"]
@@ -264,11 +316,10 @@ async def delete_device(request: web.Request) -> web.Response:
 
 
 async def update_token(request: web.Request) -> web.Response:
-    """Update device FCM token."""
+    """Update device push token."""
     device_id = request.match_info["device_id"]
-    token_device_id = _validate_api_token(request)
 
-    if token_device_id != device_id:
+    if not _validate_device_or_admin(request, device_id):
         return web.json_response({"error": "Unauthorized"}, status=401)
 
     try:
@@ -289,8 +340,42 @@ async def update_token(request: web.Request) -> web.Response:
     return web.json_response({"success": True})
 
 
+async def list_issues(request: web.Request) -> web.Response:
+    """List active bridge issues (admin token required)."""
+    if not _validate_admin_token(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    issue_manager = request.app.get("issue_manager")
+    if not issue_manager:
+        return web.json_response({"issues": [], "count": 0})
+
+    issues = issue_manager.active_issues
+    return web.json_response({
+        "issues": issues,
+        "count": len(issues),
+    })
+
+
+async def dismiss_issue(request: web.Request) -> web.Response:
+    """Dismiss an active bridge issue (admin token required)."""
+    if not _validate_admin_token(request):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    issue_id = request.match_info["issue_id"]
+    issue_manager = request.app.get("issue_manager")
+
+    if not issue_manager:
+        return web.json_response({"error": "Issue manager not available"}, status=503)
+
+    success = issue_manager.dismiss_issue(issue_id)
+    if not success:
+        return web.json_response({"error": "Issue not found"}, status=404)
+
+    return web.json_response({"success": True})
+
+
 async def get_config(request: web.Request) -> web.Response:
-    """Get configuration for mobile app."""
+    """Get configuration for mobile app (device API token required)."""
     device_id = _validate_api_token(request)
     if not device_id:
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -317,7 +402,7 @@ async def test_notification(request: web.Request) -> web.Response:
 
     device = await device_store.get_device(device_id)
     if not device or not device.get("fcm_token"):
-        return web.json_response({"error": "No FCM token configured"}, status=400)
+        return web.json_response({"error": "No push token configured"}, status=400)
 
     notification = {
         "title": "Test Notification",
