@@ -54,6 +54,7 @@ class FrigateMQTTListener:
         else:
             await self._start_external_mqtt()
 
+        self.coordinator.mqtt_subscribed = True
         _LOGGER.info("MQTT listener started (prefix: %s)", self._topic_prefix)
 
     async def async_stop(self) -> None:
@@ -67,6 +68,7 @@ class FrigateMQTTListener:
         if self._external_client:
             await self._stop_external_mqtt()
 
+        self.coordinator.mqtt_subscribed = False
         _LOGGER.info("MQTT listener stopped")
 
     async def _subscribe_ha_mqtt(self) -> None:

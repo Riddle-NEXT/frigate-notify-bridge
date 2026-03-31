@@ -102,6 +102,7 @@ class FrigateNotifyCoordinator:
         self._frigate_auth: tuple[str, str] | None = None
         self._frigate_api_token: str | None = None
         self.last_event_at: str | None = None
+        self.mqtt_subscribed: bool = False
 
         # Set up Frigate auth if configured
         username = entry.data.get(CONF_FRIGATE_USERNAME)
