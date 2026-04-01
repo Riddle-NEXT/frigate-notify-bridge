@@ -145,6 +145,47 @@ class DeviceManager:
             cooldown_seconds = 60
         cooldown_seconds = max(0, min(24 * 3600, cooldown_seconds))
 
+        # Normalize per-camera overrides.  Each entry is a dict with nullable
+        # fields — a missing / null field means "inherit from global".
+        raw_overrides = merged.get("camera_overrides") or {}
+        camera_overrides: dict[str, dict[str, Any]] = {}
+        if isinstance(raw_overrides, dict):
+            for cam_name, cam_raw in raw_overrides.items():
+                if not isinstance(cam_raw, dict):
+                    continue
+                cam: dict[str, Any] = {}
+                # event_kinds override
+                if "event_kinds" in cam_raw and cam_raw["event_kinds"] is not None:
+                    kinds = [
+                        ("recording" if str(k).strip().lower() == "event" else str(k).strip().lower())
+                        for k in cam_raw["event_kinds"]
+                        if (
+                            "recording"
+                            if str(k).strip().lower() == "event"
+                            else str(k).strip().lower()
+                        ) in ALLOWED_EVENT_KINDS
+                    ]
+                    if kinds:
+                        cam["event_kinds"] = kinds
+                # list overrides
+                for list_key in (
+                    "labels",
+                    "excluded_labels",
+                    "sub_labels",
+                    "excluded_sub_labels",
+                    "zones",
+                    "excluded_zones",
+                ):
+                    if list_key in cam_raw and cam_raw[list_key] is not None:
+                        vals = [
+                            str(v).strip()
+                            for v in cam_raw[list_key]
+                            if str(v).strip()
+                        ]
+                        cam[list_key] = sorted(set(vals))
+                if cam:
+                    camera_overrides[str(cam_name).strip()] = cam
+
         return {
             "enabled": bool(merged.get("enabled", True)),
             "event_kinds": event_kinds,
@@ -164,6 +205,8 @@ class DeviceManager:
             "include_snapshot": bool(merged.get("include_snapshot", False)),
             "include_actions": bool(merged.get("include_actions", True)),
             "include_gif_preview": bool(merged.get("include_gif_preview", False)),
+            "cross_camera_dedup_enabled": bool(merged.get("cross_camera_dedup_enabled", True)),
+            "camera_overrides": camera_overrides,
         }
 
     def _device_media_secret(self, device: dict[str, Any]) -> str | None:
@@ -618,10 +661,20 @@ class DeviceManager:
             if not settings.get("enabled", True):
                 continue
 
-            if normalized_kind not in settings.get("event_kinds", []):
+            # Apply per-camera override if present for this camera.
+            # Only the keys explicitly set in the override replace the global
+            # values; absent keys continue to use the global settings.
+            cam_override: dict[str, Any] = {}
+            if camera:
+                cam_override = settings.get("camera_overrides", {}).get(camera, {})
+
+            effective_event_kinds = cam_override.get("event_kinds") or settings.get("event_kinds", [])
+            if normalized_kind not in effective_event_kinds:
                 continue
 
-            # Check camera filter
+            # Check camera filter (global only — per-camera overrides don't
+            # change the camera allow/exclude lists since we're already on a
+            # specific camera).
             allowed_cameras = settings.get("cameras", [])
             excluded_cameras = settings.get("excluded_cameras", [])
             if excluded_cameras and camera and camera in excluded_cameras:
@@ -629,16 +682,17 @@ class DeviceManager:
             if allowed_cameras and camera and camera not in allowed_cameras:
                 continue
 
-            # Check label filter
-            allowed_labels = settings.get("labels", [])
-            excluded_labels = settings.get("excluded_labels", [])
+            # Check label filter (per-camera override takes precedence when set)
+            allowed_labels = cam_override.get("labels") if "labels" in cam_override else settings.get("labels", [])
+            excluded_labels = cam_override.get("excluded_labels") if "excluded_labels" in cam_override else settings.get("excluded_labels", [])
             if excluded_labels and label and label in excluded_labels:
                 continue
             if allowed_labels and label and label not in allowed_labels:
                 continue
 
-            allowed_sub_labels = settings.get("sub_labels", [])
-            excluded_sub_labels = settings.get("excluded_sub_labels", [])
+            # Check sub-label filter (per-camera override takes precedence when set)
+            allowed_sub_labels = cam_override.get("sub_labels") if "sub_labels" in cam_override else settings.get("sub_labels", [])
+            excluded_sub_labels = cam_override.get("excluded_sub_labels") if "excluded_sub_labels" in cam_override else settings.get("excluded_sub_labels", [])
             normalized_sub_label = str(sub_label or "").strip()
             if (
                 excluded_sub_labels
@@ -656,9 +710,9 @@ class DeviceManager:
                 if not matches_none and not matches_value:
                     continue
 
-            # Check zone filter
-            allowed_zones = settings.get("zones", [])
-            excluded_zones = set(settings.get("excluded_zones", []))
+            # Check zone filter (per-camera override takes precedence when set)
+            allowed_zones = cam_override.get("zones") if "zones" in cam_override else settings.get("zones", [])
+            excluded_zones = set(cam_override.get("excluded_zones") if "excluded_zones" in cam_override else settings.get("excluded_zones", []))
             if excluded_zones and zone_set.intersection(excluded_zones):
                 continue
             if allowed_zones:
