@@ -1301,7 +1301,7 @@ class FrigateMediaView(BaseAPIView):
         if media_kind == "event_clip":
             return f"{frigate_url}/api/events/{media_id}/clip.mp4"
         if media_kind == "event_preview_gif":
-            return f"{frigate_url}/api/events/{media_id}/preview?format=gif"
+            return f"{frigate_url}/api/events/{media_id}/preview.gif"
         if media_kind == "classification_image":
             parts = media_id.split("/")
             if len(parts) < 3:
