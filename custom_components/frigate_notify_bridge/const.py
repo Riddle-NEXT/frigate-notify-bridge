@@ -22,79 +22,17 @@ CONF_DEBUG_LOGGING: Final = "debug_logging"
 CONF_PUSH_PROVIDER: Final = "push_provider"
 CONF_FCM_CREDENTIALS: Final = "fcm_credentials"
 CONF_FCM_PROJECT_ID: Final = "fcm_project_id"
-CONF_FCM_SETUP_METHOD: Final = "fcm_setup_method"
-CONF_FIREBASE_PROJECT: Final = "firebase_project"
 CONF_NTFY_URL: Final = "ntfy_url"
 CONF_NTFY_TOPIC: Final = "ntfy_topic"
 CONF_NTFY_TOKEN: Final = "ntfy_token"
 CONF_PUSHOVER_USER_KEY: Final = "pushover_user_key"
 CONF_PUSHOVER_API_TOKEN: Final = "pushover_api_token"
 
-# FCM setup methods
-FCM_SETUP_OAUTH: Final = "oauth"
-FCM_SETUP_MANUAL: Final = "manual"
-
-# FCM API
+# FCM API (used by the manual FCM provider)
 FCM_SEND_URL: Final = "https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
 GOOGLE_TOKEN_URL: Final = "https://oauth2.googleapis.com/token"
 FCM_SCOPE: Final = "https://www.googleapis.com/auth/firebase.messaging"
 FCM_TOKEN_CACHE_BUFFER_SECONDS: Final = 300  # Refresh 5 min early
-
-# Google OAuth — authorization code flow via relay page
-GOOGLE_AUTH_URL: Final = "https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_OAUTH_REDIRECT_URI: Final = (
-    "https://riddle-next.github.io/frigate-notify-bridge/callback"
-)
-GOOGLE_OAUTH_SCOPES: Final = [
-    "https://www.googleapis.com/auth/cloud-platform",
-]
-GOOGLE_REVOKE_URL: Final = "https://oauth2.googleapis.com/revoke"
-# Embedded OAuth client ID (public, not secret — used to initiate the auth flow)
-GOOGLE_CLIENT_ID: Final = (
-    "732144175760-gsf70tipdiou8mfo4vicf323fla8jtpu.apps.googleusercontent.com"
-)
-
-# Google Cloud Resource Manager API
-GCP_CREATE_PROJECT_URL: Final = (
-    "https://cloudresourcemanager.googleapis.com/v3/projects"
-)
-GCP_GET_PROJECT_URL: Final = (
-    "https://cloudresourcemanager.googleapis.com/v3/projects/{project_id}"
-)
-GCP_OPERATIONS_URL: Final = (
-    "https://cloudresourcemanager.googleapis.com/v3/{operation_name}"
-)
-
-# Firebase Management API
-FIREBASE_LIST_PROJECTS_URL: Final = "https://firebase.googleapis.com/v1beta1/projects"
-FIREBASE_ADD_URL: Final = (
-    "https://firebase.googleapis.com/v1beta1/projects/{project_id}:addFirebase"
-)
-FIREBASE_OPERATIONS_URL: Final = (
-    "https://firebase.googleapis.com/v1beta1/{operation_name}"
-)
-
-# Google IAM API
-IAM_CREATE_SA_URL: Final = (
-    "https://iam.googleapis.com/v1/projects/{project_id}/serviceAccounts"
-)
-IAM_CREATE_KEY_URL: Final = (
-    "https://iam.googleapis.com/v1/projects/{project_id}"
-    "/serviceAccounts/{sa_email}/keys"
-)
-IAM_SA_EMAIL_TEMPLATE: Final = "{sa_name}@{project_id}.iam.gserviceaccount.com"
-
-# Service Usage API (enable FCM)
-SERVICE_USAGE_ENABLE_URL: Final = (
-    "https://serviceusage.googleapis.com/v1/projects/{project_id}"
-    "/services/{service_name}:enable"
-)
-FCM_SERVICE_NAME: Final = "fcm.googleapis.com"
-IAM_SERVICE_NAME: Final = "iam.googleapis.com"
-
-# Service account defaults
-FCM_SA_NAME: Final = "frigate-notify-bridge"
-FCM_SA_DISPLAY_NAME: Final = "Frigate Notify Bridge"
 
 # Push providers
 PUSH_PROVIDER_FCM: Final = "fcm"
