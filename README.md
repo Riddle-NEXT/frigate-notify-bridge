@@ -4,7 +4,7 @@
 [![GitHub Release](https://img.shields.io/github/release/Riddle-NEXT/frigate-notify-bridge.svg?style=for-the-badge)](https://github.com/Riddle-NEXT/frigate-notify-bridge/releases)
 [![License](https://img.shields.io/github/license/Riddle-NEXT/frigate-notify-bridge.svg?style=for-the-badge)](LICENSE)
 
-Push notification bridge for [Frigate NVR](https://frigate.video/) and the [Frigate Mobile](https://github.com/Riddle-NEXT/FrigateMobile) app.
+Push notification bridge for [Frigate NVR](https://frigate.video/) and the Frigate Mobile app.
 
 This project enables push notifications from Frigate events to your mobile device, with support for:
 - **Push Relay (Recommended)** - Easiest setup, handles credentials for you
@@ -233,6 +233,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Related Projects
 
 - [Frigate NVR](https://frigate.video/) - AI-powered NVR
-- [Frigate Mobile](https://github.com/Riddle-NEXT/FrigateMobile) - iOS app for Frigate
+- Frigate Mobile - iOS/Android app for Frigate
 - [Home Assistant](https://www.home-assistant.io/) - Home automation platform
 - [HACS](https://hacs.xyz/) - Home Assistant Community Store
