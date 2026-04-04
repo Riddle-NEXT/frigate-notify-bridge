@@ -1,10 +1,10 @@
 # Frigate Notify Bridge
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![GitHub Release](https://img.shields.io/github/release/LowkeyNEXT/frigate-notify-bridge.svg?style=for-the-badge)](https://github.com/LowkeyNEXT/frigate-notify-bridge/releases)
-[![License](https://img.shields.io/github/license/LowkeyNEXT/frigate-notify-bridge.svg?style=for-the-badge)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/release/Riddle-NEXT/frigate-notify-bridge.svg?style=for-the-badge)](https://github.com/Riddle-NEXT/frigate-notify-bridge/releases)
+[![License](https://img.shields.io/github/license/Riddle-NEXT/frigate-notify-bridge.svg?style=for-the-badge)](LICENSE)
 
-Push notification bridge for [Frigate NVR](https://frigate.video/) and the [Frigate Mobile](https://github.com/LowkeyNEXT/FrigateMobile) app.
+Push notification bridge for [Frigate NVR](https://frigate.video/) and the Frigate Mobile app.
 
 This project enables push notifications from Frigate events to your mobile device, with support for:
 - **Push Relay (Recommended)** - Easiest setup, handles credentials for you
@@ -31,7 +31,7 @@ The easiest way to use Frigate Notify Bridge is as a Home Assistant custom integ
 
 #### Quick Install
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=LowkeyNEXT&repository=frigate-notify-bridge&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=Riddle-NEXT&repository=frigate-notify-bridge&category=integration)
 
 Or follow the manual steps below.
 
@@ -46,7 +46,7 @@ Or follow the manual steps below.
 1. Open HACS in Home Assistant
 2. Click on "Integrations"
 3. Click the three dots menu → "Custom repositories"
-4. Add this repository URL: `https://github.com/LowkeyNEXT/frigate-notify-bridge`
+4. Add this repository URL: `https://github.com/Riddle-NEXT/frigate-notify-bridge`
 5. Select category: "Integration"
 6. Click "Add"
 7. Search for "Frigate Notify Bridge" and install
@@ -54,7 +54,7 @@ Or follow the manual steps below.
 
 #### Manual Installation
 
-1. Download the latest release from the [Releases](https://github.com/LowkeyNEXT/frigate-notify-bridge/releases) page
+1. Download the latest release from the [Releases](https://github.com/Riddle-NEXT/frigate-notify-bridge/releases) page
 2. Extract the `custom_components/frigate_notify_bridge` folder
 3. Copy it to your Home Assistant `config/custom_components/` directory
 4. Restart Home Assistant
@@ -78,7 +78,7 @@ For users without Home Assistant, run the bridge as a standalone Docker containe
 ```yaml
 services:
   frigate-notify-bridge:
-    image: ghcr.io/LowkeyNEXT/frigate-notify-bridge:latest
+    image: ghcr.io/Riddle-NEXT/frigate-notify-bridge:latest
     container_name: frigate-notify-bridge
     restart: unless-stopped
     ports:
@@ -233,6 +233,6 @@ MIT License - see [LICENSE](LICENSE) file for details.
 ## Related Projects
 
 - [Frigate NVR](https://frigate.video/) - AI-powered NVR
-- [Frigate Mobile](https://github.com/LowkeyNEXT/FrigateMobile) - iOS app for Frigate
+- Frigate Mobile - iOS/Android app for Frigate
 - [Home Assistant](https://www.home-assistant.io/) - Home automation platform
 - [HACS](https://hacs.xyz/) - Home Assistant Community Store

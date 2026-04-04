@@ -14,7 +14,7 @@ import urllib.parse
 
 # Constants (same as const.py)
 CLIENT_ID = "732144175760-gsf70tipdiou8mfo4vicf323fla8jtpu.apps.googleusercontent.com"
-REDIRECT_URI = "https://lowkeynext.github.io/frigate-notify-bridge/callback"
+REDIRECT_URI = "https://riddle-next.github.io/frigate-notify-bridge/callback"
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SCOPES = "https://www.googleapis.com/auth/cloud-platform"

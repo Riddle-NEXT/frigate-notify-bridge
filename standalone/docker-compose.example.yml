@@ -5,7 +5,7 @@ version: "3.8"
 
 services:
   frigate-notify-bridge:
-    image: ghcr.io/LowkeyNEXT/frigate-notify-bridge:latest
+    image: ghcr.io/Riddle-NEXT/frigate-notify-bridge:latest
     container_name: frigate-notify-bridge
     restart: unless-stopped
     ports:

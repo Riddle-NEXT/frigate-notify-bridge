@@ -43,7 +43,7 @@ FCM_TOKEN_CACHE_BUFFER_SECONDS: Final = 300  # Refresh 5 min early
 # Google OAuth — authorization code flow via relay page
 GOOGLE_AUTH_URL: Final = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_OAUTH_REDIRECT_URI: Final = (
-    "https://lowkeynext.github.io/frigate-notify-bridge/callback"
+    "https://riddle-next.github.io/frigate-notify-bridge/callback"
 )
 GOOGLE_OAUTH_SCOPES: Final = [
     "https://www.googleapis.com/auth/cloud-platform",
