@@ -22,6 +22,13 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_patch("/api/devices/{device_id}", update_device)
     app.router.add_delete("/api/devices/{device_id}", delete_device)
     app.router.add_post("/api/devices/{device_id}/token", update_token)
+    # Mute management
+    app.router.add_get("/api/devices/{device_id}/mutes", get_device_mutes)
+    app.router.add_post("/api/devices/{device_id}/mutes", add_device_mute)
+    app.router.add_delete("/api/devices/{device_id}/mutes", clear_device_mutes)
+    app.router.add_delete(
+        "/api/devices/{device_id}/mutes/{camera}/{label}", remove_device_mute
+    )
     # Issues (admin token required)
     app.router.add_get("/api/issues", list_issues)
     app.router.add_post("/api/issues/{issue_id}/dismiss", dismiss_issue)
@@ -370,6 +377,82 @@ async def dismiss_issue(request: web.Request) -> web.Response:
     success = issue_manager.dismiss_issue(issue_id)
     if not success:
         return web.json_response({"error": "Issue not found"}, status=404)
+
+    return web.json_response({"success": True})
+
+
+async def get_device_mutes(request: web.Request) -> web.Response:
+    """List active mutes for a device."""
+    device_id = request.match_info["device_id"]
+    if not _validate_device_or_admin(request, device_id):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    device_store = request.app["device_store"]
+    mutes = await device_store.get_mutes(device_id)
+    return web.json_response({"mutes": mutes})
+
+
+async def add_device_mute(request: web.Request) -> web.Response:
+    """Add a mute entry for a camera+label combo."""
+    device_id = request.match_info["device_id"]
+    if not _validate_device_or_admin(request, device_id):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    camera = data.get("camera")
+    label = data.get("label")
+    duration_minutes = data.get("duration_minutes", 30)
+
+    if not camera or not label:
+        return web.json_response({"error": "Missing camera or label"}, status=400)
+
+    try:
+        duration_minutes = int(duration_minutes)
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Invalid duration_minutes"}, status=400)
+    duration_minutes = max(1, min(1440, duration_minutes))
+
+    device_store = request.app["device_store"]
+    entry = await device_store.add_mute(
+        device_id, str(camera).strip(), str(label).strip(), duration_minutes,
+    )
+    if entry is None:
+        return web.json_response({"error": "Device not found"}, status=404)
+
+    return web.json_response({"success": True, "mute": entry})
+
+
+async def clear_device_mutes(request: web.Request) -> web.Response:
+    """Clear all mutes for a device."""
+    device_id = request.match_info["device_id"]
+    if not _validate_device_or_admin(request, device_id):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    device_store = request.app["device_store"]
+    success = await device_store.clear_mutes(device_id)
+    if not success:
+        return web.json_response({"error": "Device not found"}, status=404)
+
+    return web.json_response({"success": True})
+
+
+async def remove_device_mute(request: web.Request) -> web.Response:
+    """Remove a specific mute for camera+label."""
+    device_id = request.match_info["device_id"]
+    if not _validate_device_or_admin(request, device_id):
+        return web.json_response({"error": "Unauthorized"}, status=401)
+
+    camera = request.match_info["camera"]
+    label = request.match_info["label"]
+
+    device_store = request.app["device_store"]
+    success = await device_store.remove_mute(device_id, camera, label)
+    if not success:
+        return web.json_response({"error": "Mute not found"}, status=404)
 
     return web.json_response({"success": True})
 

@@ -435,6 +435,10 @@ class RelayPushProvider(PushProvider):
             "threadId": payload.camera or "frigate-mobile",
             "notificationData": self._build_notification_data(payload),
         }
+        # Include notification_tag as collapseKey so FCM replaces existing
+        # notifications with the same tag (used for cross-camera updates).
+        if payload.notification_tag:
+            body["collapseKey"] = payload.notification_tag
 
         # Validate and catch size errors early
         try:

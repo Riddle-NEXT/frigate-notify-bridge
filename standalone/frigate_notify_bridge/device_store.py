@@ -3,6 +3,7 @@
 import json
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -215,6 +216,108 @@ class DeviceStore:
         """Validate an admin token for bridge management endpoints."""
         return bool(admin_token) and secrets.compare_digest(token, admin_token)
 
+    # ── Mute management ────────────────────────────────────────────────
+
+    async def add_mute(
+        self,
+        device_id: str,
+        camera: str,
+        label: str,
+        duration_minutes: int,
+    ) -> dict[str, Any] | None:
+        """Add a mute entry for a camera+label combo on a device."""
+        if device_id not in self._devices:
+            return None
+
+        device = self._devices[device_id]
+        mutes: list[dict[str, Any]] = device.setdefault("mutes", [])
+
+        # Replace existing mute for the same camera+label
+        mutes[:] = [
+            m for m in mutes
+            if not (m.get("camera") == camera and m.get("label") == label)
+        ]
+
+        expires_at = time.time() + (duration_minutes * 60)
+        entry: dict[str, Any] = {
+            "camera": camera,
+            "label": label,
+            "expires_at": expires_at,
+        }
+        mutes.append(entry)
+        await self.save()
+        logger.debug(
+            "Added mute for device %s: camera=%s label=%s duration=%dm",
+            device_id, camera, label, duration_minutes,
+        )
+        return entry
+
+    async def remove_mute(
+        self,
+        device_id: str,
+        camera: str,
+        label: str,
+    ) -> bool:
+        """Remove a specific mute entry."""
+        if device_id not in self._devices:
+            return False
+
+        device = self._devices[device_id]
+        mutes: list[dict[str, Any]] = device.get("mutes", [])
+        original_len = len(mutes)
+        mutes[:] = [
+            m for m in mutes
+            if not (m.get("camera") == camera and m.get("label") == label)
+        ]
+        if len(mutes) == original_len:
+            return False
+
+        device["mutes"] = mutes
+        await self.save()
+        return True
+
+    async def clear_mutes(self, device_id: str) -> bool:
+        """Clear all mutes for a device."""
+        if device_id not in self._devices:
+            return False
+        self._devices[device_id]["mutes"] = []
+        await self.save()
+        return True
+
+    async def get_mutes(self, device_id: str) -> list[dict[str, Any]]:
+        """Return active (non-expired) mutes for a device."""
+        device = self._devices.get(device_id)
+        if not device:
+            return []
+        now = time.time()
+        return [m for m in device.get("mutes", []) if m.get("expires_at", 0) > now]
+
+    @staticmethod
+    def _prune_expired_mutes(device: dict[str, Any]) -> list[dict[str, Any]]:
+        """Remove expired mute entries in-place and return active ones."""
+        mutes: list[dict[str, Any]] = device.get("mutes", [])
+        if not mutes:
+            return []
+        now = time.time()
+        active = [m for m in mutes if m.get("expires_at", 0) > now]
+        if len(active) != len(mutes):
+            device["mutes"] = active
+        return active
+
+    @staticmethod
+    def _is_muted(
+        mutes: list[dict[str, Any]],
+        camera: str | None,
+        label: str | None,
+    ) -> bool:
+        """Check if a camera+label combo is muted."""
+        if not mutes or not camera or not label:
+            return False
+        for mute in mutes:
+            if mute.get("camera") == camera and mute.get("label") == label:
+                return True
+        return False
+
     async def get_devices_for_notification(
         self,
         camera: str | None = None,
@@ -228,6 +331,15 @@ class DeviceStore:
             settings = device.get("notification_settings", {})
 
             if not settings.get("enabled", True):
+                continue
+
+            # Prune expired mutes and check if this camera+label is muted
+            active_mutes = self._prune_expired_mutes(device)
+            if self._is_muted(active_mutes, camera, label):
+                logger.debug(
+                    "Skipping device %s: camera=%s label=%s is muted",
+                    device.get("id"), camera, label,
+                )
                 continue
 
             allowed_cameras = settings.get("cameras", [])

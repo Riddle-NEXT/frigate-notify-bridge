@@ -29,6 +29,11 @@ class NotificationPayload:
     sub_label: str | None = None
     zones: list[str] | None = None
 
+    # Notification replacement tag — when set, push providers use this as a
+    # collapse/replacement key so a newer notification replaces an earlier one
+    # on the device (e.g. cross-camera alert updates).
+    notification_tag: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         result: dict[str, Any] = {
@@ -56,6 +61,8 @@ class NotificationPayload:
             result["sub_label"] = self.sub_label
         if self.zones:
             result["zones"] = self.zones
+        if self.notification_tag:
+            result["notification_tag"] = self.notification_tag
         return result
 
 

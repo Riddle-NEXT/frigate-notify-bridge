@@ -142,6 +142,8 @@ async def async_setup_api(
     hass.http.register_view(DevicesView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceTokenView(entry, coordinator, device_manager))
+    hass.http.register_view(DeviceMutesView(entry, coordinator, device_manager))
+    hass.http.register_view(DeviceMuteDetailView(entry, coordinator, device_manager))
     hass.http.register_view(ConfigView(entry, coordinator, device_manager))
     hass.http.register_view(StatusView(entry, coordinator, device_manager, issue_manager=issue_manager))
     hass.http.register_view(TestNotificationView(entry, coordinator, device_manager))
@@ -529,6 +531,10 @@ class DeviceView(BaseAPIView):
             )
 
         _LOGGER.debug("Returning device details for %s", device_id)
+
+        # Return active mutes (prune expired)
+        mutes = await self.device_manager.async_get_mutes(device_id)
+
         # Return device info without sensitive data
         return web.json_response({
             "id": device["id"],
@@ -537,6 +543,7 @@ class DeviceView(BaseAPIView):
             "subscription_active": device.get("subscription_active"),
             "subscription_last_verified_at": device.get("subscription_last_verified_at"),
             "notification_settings": device.get("notification_settings", {}),
+            "mutes": mutes,
         })
 
     async def patch(self, request: web.Request, device_id: str) -> web.Response:
@@ -644,6 +651,91 @@ class DeviceTokenView(BaseAPIView):
                 {"error": "Device not found"},
                 status=404,
             )
+
+        return web.json_response({"success": True})
+
+
+class DeviceMutesView(BaseAPIView):
+    """Manage notification mutes for a device."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/mutes"
+    name = "api:frigate_notify_bridge:device_mutes"
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        """List active mutes for a device."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        mutes = await self.device_manager.async_get_mutes(device_id)
+        return web.json_response({"mutes": mutes})
+
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
+        """Add a mute entry for a camera+label combo."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        camera = data.get("camera")
+        label = data.get("label")
+        duration_minutes = data.get("duration_minutes", 30)
+
+        if not camera or not label:
+            return web.json_response(
+                {"error": "Missing camera or label"}, status=400
+            )
+
+        try:
+            duration_minutes = int(duration_minutes)
+        except (TypeError, ValueError):
+            return web.json_response(
+                {"error": "Invalid duration_minutes"}, status=400
+            )
+        duration_minutes = max(1, min(1440, duration_minutes))  # 1 min to 24 hours
+
+        entry = await self.device_manager.async_add_mute(
+            device_id, str(camera).strip(), str(label).strip(), duration_minutes
+        )
+        if entry is None:
+            return web.json_response({"error": "Device not found"}, status=404)
+
+        return web.json_response({"success": True, "mute": entry})
+
+    async def delete(self, request: web.Request, device_id: str) -> web.Response:
+        """Clear all mutes for a device."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        success = await self.device_manager.async_clear_mutes(device_id)
+        if not success:
+            return web.json_response({"error": "Device not found"}, status=404)
+
+        return web.json_response({"success": True})
+
+
+class DeviceMuteDetailView(BaseAPIView):
+    """Remove a specific mute entry."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/mutes/{{camera}}/{{label}}"
+    name = "api:frigate_notify_bridge:device_mute_detail"
+
+    async def delete(
+        self, request: web.Request, device_id: str, camera: str, label: str,
+    ) -> web.Response:
+        """Remove a specific mute for camera+label."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        success = await self.device_manager.async_remove_mute(device_id, camera, label)
+        if not success:
+            return web.json_response({"error": "Mute not found"}, status=404)
 
         return web.json_response({"success": True})
 

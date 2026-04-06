@@ -25,6 +25,7 @@ from .const import (
 )
 import json as _json
 
+from .cross_camera import CrossCameraCorrelator, CorrelationRecord, compose_snapshot_image
 from .issues import ISSUE_NOTIFICATION_DELIVERY
 from .push_providers.base import NotificationPayload, SendResult
 
@@ -103,6 +104,7 @@ class FrigateNotifyCoordinator:
         self._frigate_api_token: str | None = None
         self.last_event_at: str | None = None
         self.mqtt_subscribed: bool = False
+        self._correlator = CrossCameraCorrelator()
 
         # Set up Frigate auth if configured
         username = entry.data.get(CONF_FRIGATE_USERNAME)
@@ -169,19 +171,46 @@ class FrigateNotifyCoordinator:
         from .push_providers.relay import RelayPushProvider
 
         use_relay = isinstance(self.push_provider, RelayPushProvider)
+
         async def send_for_device(
             device: dict[str, Any],
         ) -> tuple[dict[str, Any], SendResult] | None:
             token = _device_target(device, use_relay)
             if not token:
                 return None
-            payload = await self._build_notification_payload(event_data, device)
+
+            settings = device.get("notification_settings", {})
+            group = self._correlator.find_device_camera_group(camera or "", settings)
+
+            if group and camera and label:
+                # Cross-camera correlation path
+                is_update, record = self._correlator.check_correlation(
+                    group_name=group["name"],
+                    camera=camera,
+                    label=label,
+                    event_id=event_id or "",
+                    score=score,
+                    time_window=group.get("time_window_seconds", 10),
+                )
+                if is_update:
+                    payload = await self._build_cross_camera_update_payload(
+                        event_data, device, record
+                    )
+                else:
+                    # First camera — send immediately but with a notification_tag
+                    payload = await self._build_notification_payload(
+                        event_data, device, notification_tag=record.notification_tag,
+                    )
+            else:
+                payload = await self._build_notification_payload(event_data, device)
+
             _LOGGER.info(
-                "Sending %s notification to device %s for event=%s review=%s",
+                "Sending %s notification to device %s for event=%s review=%s tag=%s",
                 event_kind,
                 device["id"],
                 event_id,
                 review_id,
+                payload.notification_tag or "none",
             )
             result = await self.push_provider.async_send(token, payload)
             return device, result
@@ -267,6 +296,7 @@ class FrigateNotifyCoordinator:
         self,
         event_data: dict[str, Any],
         device: dict[str, Any],
+        notification_tag: str | None = None,
     ) -> NotificationPayload:
         """Build notification payload from event data."""
         event_id = event_data.get("event_id")
@@ -379,7 +409,111 @@ class FrigateNotifyCoordinator:
             label=label,
             sub_label=str(sub_label) if sub_label else None,
             zones=zones,
+            notification_tag=notification_tag,
         )
+
+    async def _build_cross_camera_update_payload(
+        self,
+        event_data: dict[str, Any],
+        device: dict[str, Any],
+        record: CorrelationRecord,
+    ) -> NotificationPayload:
+        """Build an UPDATE notification for a cross-camera correlation.
+
+        This notification uses the same notification_tag as the original so
+        it replaces the first notification on the device.
+        """
+        camera = event_data.get("camera", "Unknown")
+        label = event_data.get("label", "object")
+        score = event_data.get("score", 0)
+        zones = event_data.get("zones", [])
+        event_id = event_data.get("event_id")
+        event_kind = _normalize_event_kind(event_data.get("event_kind", "recording"))
+
+        display_label = _display_label(label)
+        n_cameras = record.camera_count
+        camera_list = ", ".join(record.cameras)
+
+        title = f"{display_label} detected ({n_cameras} cameras)"
+        if event_kind == "alert":
+            title = f"{display_label} activity ({n_cameras} cameras)"
+
+        # Build body with camera list and best confidence
+        best_score = max(record.scores.values()) if record.scores else 0
+        score_pct = int(best_score * 100) if best_score <= 1 else int(best_score)
+        body_parts = [camera_list]
+        if score_pct > 0:
+            body_parts.append(f"{score_pct}% confidence")
+        if zones:
+            body_parts.append(f"Zone: {', '.join(zones)}")
+        body = " \u00b7 ".join(body_parts)
+
+        # Try to build a composite snapshot image
+        image_url: str | None = None
+        settings = device.get("notification_settings", {})
+        primary_event_id = event_id or record.event_id
+
+        if settings.get("include_snapshot", False) or settings.get("include_thumbnail", True):
+            # Attempt composite from the Frigate API
+            composite_bytes = await self._try_composite_snapshot(record)
+            if composite_bytes is not None:
+                # We can't serve arbitrary bytes directly; use the newest camera's snapshot
+                # The composite is stored as a data URL in the data payload
+                # For now, fall back to the latest camera's snapshot via proxy
+                pass
+
+            # Use the latest camera's event snapshot via media proxy
+            latest_event_id = record.event_ids.get(camera) or primary_event_id
+            if latest_event_id:
+                if settings.get("include_snapshot", False):
+                    image_url = self._build_media_url(device, "event_snapshot", latest_event_id)
+                elif settings.get("include_thumbnail", True):
+                    image_url = self._build_media_url(device, "event_thumbnail", latest_event_id)
+
+        data: dict[str, Any] = {
+            "ts": str(int(datetime.utcnow().timestamp())),
+            "xcam": "1",
+            "xcam_cameras": camera_list,
+            "xcam_count": str(n_cameras),
+        }
+        if score_pct > 0:
+            data["score"] = str(score_pct)
+        if zones:
+            data["zones"] = ",".join(zones[:3])
+
+        return NotificationPayload(
+            title=title,
+            body=body,
+            data=data,
+            image_url=image_url,
+            thumbnail_url=None,
+            priority="high",
+            event_id=primary_event_id,
+            camera=camera,
+            label=label,
+            zones=zones,
+            notification_tag=record.notification_tag,
+        )
+
+    async def _try_composite_snapshot(
+        self,
+        record: CorrelationRecord,
+    ) -> bytes | None:
+        """Attempt to build a composite side-by-side snapshot from multiple cameras."""
+        if not self._frigate_url or len(record.event_ids) < 2:
+            return None
+        try:
+            session = async_get_clientsession(self.hass)
+            token = await self._async_get_frigate_access_token()
+            return await compose_snapshot_image(
+                session=session,
+                frigate_url=self._frigate_url,
+                event_ids=record.event_ids,
+                access_token=token,
+            )
+        except Exception as err:
+            _LOGGER.debug("Composite snapshot failed: %s", err)
+            return None
 
     async def _async_get_review_details(self, review_id: str) -> dict[str, Any] | None:
         """Fetch full review details from Frigate when needed."""
