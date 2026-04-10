@@ -129,6 +129,48 @@ def _proxy_response_headers(response: aiohttp.ClientResponse) -> dict[str, str]:
     return headers
 
 
+def _proxy_request_headers(
+    request: web.Request,
+    *,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Copy safe client request headers upstream."""
+    forwarded = {
+        "accept",
+        "accept-language",
+        "cache-control",
+        "if-match",
+        "if-modified-since",
+        "if-none-match",
+        "if-range",
+        "range",
+    }
+    headers: dict[str, str] = {}
+    for key, value in request.headers.items():
+        if key.lower() in forwarded:
+            headers[key] = value
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+async def _stream_proxy_response(
+    request: web.Request,
+    response: aiohttp.ClientResponse,
+) -> web.StreamResponse:
+    """Stream an upstream response to the client without buffering the body."""
+    downstream = web.StreamResponse(
+        status=response.status,
+        reason=response.reason,
+        headers=_proxy_response_headers(response),
+    )
+    await downstream.prepare(request)
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        await downstream.write(chunk)
+    await downstream.write_eof()
+    return downstream
+
+
 async def async_setup_api(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1110,7 +1152,7 @@ class FrigateProxyView(BaseAPIView):
             target = f"{target}?{query_string}"
 
         session = async_get_clientsession(request.app["hass"])
-        headers = {}
+        headers = _proxy_request_headers(request)
         frigate_token = await self._get_frigate_token(
             session, frigate_url, device_id
         )
@@ -1158,6 +1200,10 @@ class FrigateProxyView(BaseAPIView):
                         async with session.request(
                             method, target, headers=headers, data=body
                         ) as retry_resp:
+                            if method == "GET":
+                                return await _stream_proxy_response(
+                                    request, retry_resp
+                                )
                             resp_body = await retry_resp.read()
                             return web.Response(
                                 body=resp_body,
@@ -1171,6 +1217,18 @@ class FrigateProxyView(BaseAPIView):
                     async with session.request(
                         method, target, headers=headers, data=body
                     ) as retry_resp:
+                        if method == "GET":
+                            if retry_resp.status >= 400:
+                                _LOGGER.warning(
+                                    "Frigate proxy retry response: device_id=%s method=%s target=%s status=%s",
+                                    device_id,
+                                    method,
+                                    target,
+                                    retry_resp.status,
+                                )
+                            return await _stream_proxy_response(
+                                request, retry_resp
+                            )
                         retry_body = await retry_resp.read()
                         if retry_resp.status >= 400:
                             _LOGGER.warning(
@@ -1186,7 +1244,6 @@ class FrigateProxyView(BaseAPIView):
                             headers=_proxy_response_headers(retry_resp),
                         )
 
-                resp_body = await resp.read()
                 if resp.status >= 400:
                     _LOGGER.warning(
                         "Frigate proxy response: device_id=%s method=%s target=%s status=%s",
@@ -1195,6 +1252,9 @@ class FrigateProxyView(BaseAPIView):
                         target,
                         resp.status,
                     )
+                if method == "GET":
+                    return await _stream_proxy_response(request, resp)
+                resp_body = await resp.read()
                 return web.Response(
                     body=resp_body,
                     status=resp.status,
@@ -1536,7 +1596,7 @@ class FrigateMediaView(BaseAPIView):
             return web.json_response({"error": "Invalid signature"}, status=401)
 
         session = async_get_clientsession(request.app["hass"])
-        headers: dict[str, str] = {}
+        headers = _proxy_request_headers(request)
         frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
         if frigate_url:
             token = await self._get_frigate_token(session, frigate_url, device_id)
@@ -1570,12 +1630,7 @@ class FrigateMediaView(BaseAPIView):
                     if token:
                         headers["Authorization"] = f"Bearer {token}"
                         async with session.get(target_url, headers=headers, timeout=20) as retry:
-                            retry_body = await retry.read()
-                            return web.Response(
-                                status=retry.status,
-                                body=retry_body,
-                                headers=_proxy_response_headers(retry),
-                            )
+                            return await _stream_proxy_response(request, retry)
 
                 if resp.status >= 400 and media_kind == "review_gif":
                     fallback_url = await self._resolve_review_fallback_url(
@@ -1590,14 +1645,10 @@ class FrigateMediaView(BaseAPIView):
                             headers=headers,
                             timeout=20,
                         ) as fallback_resp:
-                            fallback_body = await fallback_resp.read()
-                            return web.Response(
-                                status=fallback_resp.status,
-                                body=fallback_body,
-                                headers=_proxy_response_headers(fallback_resp),
+                            return await _stream_proxy_response(
+                                request, fallback_resp
                             )
 
-                body = await resp.read()
                 if resp.status >= 400:
                     _LOGGER.warning(
                         "Frigate media proxy response: device_id=%s media_kind=%s media_id=%s target=%s status=%s",
@@ -1607,11 +1658,7 @@ class FrigateMediaView(BaseAPIView):
                         target_url,
                         resp.status,
                     )
-                return web.Response(
-                    status=resp.status,
-                    body=body,
-                    headers=_proxy_response_headers(resp),
-                )
+                return await _stream_proxy_response(request, resp)
         except Exception as err:
             _LOGGER.error("Frigate media proxy error: %s", err)
             return web.json_response({"error": "Media proxy failed"}, status=502)
