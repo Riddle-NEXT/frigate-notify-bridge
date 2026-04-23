@@ -8,7 +8,7 @@ import logging
 from pathlib import Path
 import ssl
 from typing import Any, TYPE_CHECKING
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from http.cookies import SimpleCookie
 
 import aiohttp
@@ -191,6 +191,7 @@ async def async_setup_api(
     hass.http.register_view(TestNotificationView(entry, coordinator, device_manager))
     hass.http.register_view(WebRTCCredentialsView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateProxyView(entry, coordinator, device_manager))
+    hass.http.register_view(FrigateLiveProxyView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateMediaView(entry, coordinator, device_manager))
     hass.http.register_view(FrigateCredentialsView(entry, coordinator, device_manager))
     if issue_manager is not None:
@@ -859,6 +860,9 @@ class StatusView(BaseAPIView):
         base: dict = {
             "status": "ok",
             "version": "0.1.0",
+            "capabilities": {
+                "live_mse_proxy": True,
+            },
         }
         if device_id:
             _LOGGER.debug("Returning authenticated status to device %s", device_id)
@@ -1393,6 +1397,174 @@ class FrigateProxyView(BaseAPIView):
     async def patch(self, request: web.Request, path: str = "") -> web.Response:
         """Handle PATCH."""
         return await self._proxy_request(request, "PATCH")
+
+
+class FrigateLiveProxyView(FrigateProxyView):
+    """Proxy signed live websocket/media requests to Frigate without HA auth."""
+
+    requires_auth = False
+    url = f"{API_BASE_PATH}/live/{{path:.*}}"
+    name = "api:frigate_notify_bridge:frigate_live_proxy"
+
+    @staticmethod
+    def _build_signed_live_media_id(
+        path: str,
+        request: web.Request,
+    ) -> str:
+        """Build the canonical signed path used by the mobile app."""
+        filtered_query = [
+            (key, value)
+            for key, value in request.query.items()
+            if key not in {"device_id", "expires", "sig"}
+        ]
+        filtered_query.sort(key=lambda item: (item[0], item[1]))
+        live_path = f"live/{path.lstrip('/')}"
+        if not filtered_query:
+            return live_path
+        return f"{live_path}?{urlencode(filtered_query)}"
+
+    def _resolve_signed_device_id(
+        self,
+        request: web.Request,
+        path: str,
+    ) -> str | None:
+        """Resolve a device using the signed live proxy URL."""
+        if not path.startswith("mse/"):
+            _LOGGER.warning("Rejected unsigned live proxy path: %s", path)
+            return None
+
+        device_id = request.query.get("device_id", "").strip()
+        signature = request.query.get("sig", "").strip()
+        expires_raw = request.query.get("expires", "").strip()
+        if not device_id or not signature or not expires_raw:
+            return None
+
+        try:
+            expires = int(expires_raw)
+        except (TypeError, ValueError):
+            _LOGGER.warning(
+                "Invalid live proxy expiration for device %s path=%s value=%s",
+                device_id,
+                path,
+                expires_raw,
+            )
+            return None
+
+        media_id = self._build_signed_live_media_id(path, request)
+        if not self.device_manager.validate_media_signature(
+            device_id=device_id,
+            media_kind="live_proxy",
+            media_id=media_id,
+            expires=expires,
+            signature=signature,
+        ):
+            _LOGGER.warning(
+                "Invalid live proxy signature: device_id=%s path=%s media_id=%s",
+                device_id,
+                path,
+                media_id,
+            )
+            return None
+
+        return device_id
+
+    async def _proxy_live_request(
+        self,
+        request: web.Request,
+        method: str,
+    ) -> web.Response:
+        """Proxy a signed live request to the Frigate live namespace."""
+        path = request.match_info.get("path", "").lstrip("/")
+        device_id = self._resolve_signed_device_id(request, path)
+        if not device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+
+        frigate_url = self.entry.data.get(CONF_FRIGATE_URL)
+        if not frigate_url:
+            return web.json_response(
+                {"error": "Frigate URL not configured"}, status=503
+            )
+
+        query_pairs = [
+            (key, value)
+            for key, value in request.query.items()
+            if key not in {"device_id", "expires", "sig"}
+        ]
+        target = f"{frigate_url}/live/{path}"
+        if query_pairs:
+            target = f"{target}?{urlencode(query_pairs)}"
+
+        session = async_get_clientsession(request.app["hass"])
+        headers = _proxy_request_headers(request)
+        frigate_token = await self._get_frigate_token(
+            session, frigate_url, device_id
+        )
+        if frigate_token:
+            headers["Authorization"] = f"Bearer {frigate_token}"
+
+        ws_probe = web.WebSocketResponse()
+        if method == "GET" and ws_probe.can_prepare(request).ok:
+            return await self._proxy_websocket(
+                request,
+                target=target,
+                session=session,
+                headers=headers,
+                device_id=device_id,
+            )
+
+        body = None
+        if method in ("POST", "PUT", "PATCH"):
+            body = await request.read()
+
+        content_type = request.content_type
+        if content_type and body:
+            headers["Content-Type"] = content_type
+
+        try:
+            async with session.request(
+                method, target, headers=headers, data=body
+            ) as resp:
+                if resp.status >= 400:
+                    _LOGGER.warning(
+                        "Frigate live proxy response: device_id=%s method=%s target=%s status=%s",
+                        device_id,
+                        method,
+                        target,
+                        resp.status,
+                    )
+                if method == "GET":
+                    return await _stream_proxy_response(request, resp)
+                resp_body = await resp.read()
+                return web.Response(
+                    body=resp_body,
+                    status=resp.status,
+                    headers=_proxy_response_headers(resp),
+                )
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Frigate live proxy error: %s", err)
+            return web.json_response(
+                {"error": "Failed to reach Frigate"}, status=502
+            )
+
+    async def get(self, request: web.Request, path: str = "") -> web.Response:
+        """Handle signed GET live requests."""
+        return await self._proxy_live_request(request, "GET")
+
+    async def post(self, request: web.Request, path: str = "") -> web.Response:
+        """Handle signed POST live requests."""
+        return await self._proxy_live_request(request, "POST")
+
+    async def put(self, request: web.Request, path: str = "") -> web.Response:
+        """Handle signed PUT live requests."""
+        return await self._proxy_live_request(request, "PUT")
+
+    async def delete(self, request: web.Request, path: str = "") -> web.Response:
+        """Handle signed DELETE live requests."""
+        return await self._proxy_live_request(request, "DELETE")
+
+    async def patch(self, request: web.Request, path: str = "") -> web.Response:
+        """Handle signed PATCH live requests."""
+        return await self._proxy_live_request(request, "PATCH")
 
 
 class FrigateMediaView(BaseAPIView):

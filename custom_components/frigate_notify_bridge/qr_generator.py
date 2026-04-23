@@ -62,19 +62,24 @@ async def _get_cloud_webrtc_config(hass: HomeAssistant) -> dict[str, Any] | None
         if "web_rtc" in hass.config.components:
             from homeassistant.components.web_rtc import async_get_ice_servers
             ice_servers = async_get_ice_servers(hass)
-            if ice_servers:
+            has_turn = False
+            for server in ice_servers:
+                urls = server.urls if isinstance(server.urls, list) else [server.urls]
+                if any(
+                    str(url).strip().lower().startswith(("turn:", "turns:"))
+                    for url in urls
+                ):
+                    has_turn = True
+                    break
+
+            if has_turn:
                 return {
                     "enabled": True,
                     "provider": "nabu_casa",
                     "relay_available": True,
                 }
 
-        # Fallback: cloud is logged in, assume WebRTC relay may be available
-        return {
-            "enabled": True,
-            "provider": "nabu_casa",
-            "relay_available": True,
-        }
+        return None
     except Exception as e:
         _LOGGER.debug("Could not get WebRTC config: %s", e)
         return None
