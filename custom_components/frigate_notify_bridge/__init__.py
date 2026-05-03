@@ -96,7 +96,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await issue_manager.async_clear_issue(ISSUE_PUSH_PROVIDER_UNAVAILABLE)
 
     # Create device manager
-    device_manager = DeviceManager(hass, store, stored_data.get("devices", {}))
+    device_manager = DeviceManager(
+        hass,
+        store,
+        stored_data.get("devices", {}),
+        stored_data.get("settings", {}),
+    )
 
     # Create coordinator
     coordinator = FrigateNotifyCoordinator(

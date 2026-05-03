@@ -23,6 +23,13 @@ from .const import (
     EVENT_DEVICE_PAIRED,
     EVENT_DEVICE_REMOVED,
 )
+from .mute_modes import (
+    active_mute_mode_for_device,
+    normalize_mute_mode,
+    normalize_mute_mode_settings,
+    should_mute_event,
+)
+from .smart_rules import normalize_smart_rules
 
 _LOGGER = logging.getLogger(__name__)
 MEDIA_SIGNATURE_CLOCK_SKEW_SECONDS = 24 * 60 * 60
@@ -48,6 +55,17 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
     "include_actions": True,
     "include_gif_preview": False,
     "cross_camera_dedup_enabled": True,
+    "cross_camera_dedup_seconds": 120,
+    "smart_rules": [],
+    "mute_mode": {
+        "default_duration_minutes": 30,
+        "default_scope": "device",
+        "important_labels": ["package"],
+        "important_sub_labels": [],
+        "live_activity_enabled": False,
+        "notify_on_start": True,
+        "notify_on_end": True,
+    },
 }
 
 ALLOWED_EVENT_KINDS = {"alert", "detection", "recording"}
@@ -61,11 +79,13 @@ class DeviceManager:
         hass: HomeAssistant,
         store,
         initial_devices: dict[str, Any] | None = None,
+        initial_settings: dict[str, Any] | None = None,
     ) -> None:
         """Initialize the device manager."""
         self.hass = hass
         self._store = store
         self._devices: dict[str, dict[str, Any]] = initial_devices or {}
+        self._settings: dict[str, Any] = initial_settings or {}
         self._pending_pairings: dict[str, dict[str, Any]] = {}
         self._cooldowns: dict[str, datetime] = {}
 
@@ -73,13 +93,14 @@ class DeviceManager:
             device["notification_settings"] = self.normalize_notification_settings(
                 device.get("notification_settings")
             )
+            device["mute_mode"] = normalize_mute_mode(device.get("mute_mode"))
 
     async def async_save(self) -> None:
         """Save devices to storage."""
         await self._store.async_save(
             {
                 "devices": self._devices,
-                "settings": {},
+                "settings": self._settings,
             }
         )
 
@@ -145,6 +166,17 @@ class DeviceManager:
         except (TypeError, ValueError):
             cooldown_seconds = 60
         cooldown_seconds = max(0, min(24 * 3600, cooldown_seconds))
+
+        try:
+            cross_camera_dedup_seconds = int(
+                float(merged.get("cross_camera_dedup_seconds", 120))
+            )
+        except (TypeError, ValueError):
+            cross_camera_dedup_seconds = 120
+        cross_camera_dedup_seconds = max(
+            0,
+            min(24 * 3600, cross_camera_dedup_seconds),
+        )
 
         # Normalize per-camera overrides.  Each entry is a dict with nullable
         # fields — a missing / null field means "inherit from global".
@@ -234,6 +266,9 @@ class DeviceManager:
             "include_actions": bool(merged.get("include_actions", True)),
             "include_gif_preview": bool(merged.get("include_gif_preview", False)),
             "cross_camera_dedup_enabled": bool(merged.get("cross_camera_dedup_enabled", True)),
+            "cross_camera_dedup_seconds": cross_camera_dedup_seconds,
+            "smart_rules": normalize_smart_rules(merged.get("smart_rules")),
+            "mute_mode": normalize_mute_mode_settings(merged.get("mute_mode")),
             "camera_overrides": camera_overrides,
             "camera_groups": camera_groups,
         }
@@ -725,6 +760,115 @@ class DeviceManager:
         mutes: list[dict[str, Any]] = device.get("mutes", [])
         return [m for m in mutes if m.get("expires_at", 0) > now]
 
+    async def async_activate_mute_mode(
+        self,
+        device_id: str,
+        *,
+        duration_minutes: int,
+        scope: str = "device",
+        important_labels: list[str] | None = None,
+        important_sub_labels: list[str] | None = None,
+        live_activity_enabled: bool | None = None,
+        reason: str = "manual",
+    ) -> dict[str, Any] | None:
+        """Activate mute mode for one device or every paired device."""
+        source_device = self._devices.get(device_id)
+        if not source_device:
+            return None
+
+        try:
+            duration_minutes = int(duration_minutes)
+        except (TypeError, ValueError):
+            duration_minutes = 30
+        duration_minutes = max(1, min(24 * 60, duration_minutes))
+
+        normalized_scope = str(scope or "device").strip().lower()
+        if normalized_scope not in {"device", "all"}:
+            normalized_scope = "device"
+
+        settings = self.normalize_notification_settings(
+            source_device.get("notification_settings")
+        ).get("mute_mode", {})
+        labels = important_labels if important_labels is not None else settings.get("important_labels", [])
+        sub_labels = (
+            important_sub_labels
+            if important_sub_labels is not None
+            else settings.get("important_sub_labels", [])
+        )
+        live_activity = (
+            bool(live_activity_enabled)
+            if live_activity_enabled is not None
+            else bool(settings.get("live_activity_enabled", False))
+        )
+        now = time.time()
+        mode = {
+            "active": True,
+            "id": f"mute-{int(now)}-{secrets.token_hex(3)}",
+            "scope": normalized_scope,
+            "device_id": device_id if normalized_scope == "device" else "",
+            "created_by_device_id": device_id,
+            "created_by_name": source_device.get("name") or source_device.get("device_name") or "",
+            "reason": reason,
+            "started_at": now,
+            "expires_at": now + duration_minutes * 60,
+            "important_labels": labels,
+            "important_sub_labels": sub_labels,
+            "live_activity_enabled": live_activity,
+            "notify_on_start": bool(settings.get("notify_on_start", True)),
+            "notify_on_end": bool(settings.get("notify_on_end", True)),
+        }
+        normalized = normalize_mute_mode(mode)
+        if normalized is None:
+            return None
+
+        targets = (
+            list(self._devices.values())
+            if normalized_scope == "all"
+            else [source_device]
+        )
+        for device in targets:
+            device["mute_mode"] = dict(normalized)
+            if normalized_scope == "device":
+                device["mute_mode"]["device_id"] = device_id
+            else:
+                device["mute_mode"]["device_id"] = ""
+        await self.async_save()
+        return normalized
+
+    async def async_end_mute_mode(
+        self,
+        device_id: str,
+        *,
+        scope: str | None = None,
+    ) -> dict[str, Any] | None:
+        """End the active mute mode for a device or all devices."""
+        if device_id not in self._devices:
+            return None
+        active = self.active_mute_mode_for_device(device_id)
+        normalized_scope = str(scope or (active or {}).get("scope") or "device").lower()
+        if normalized_scope == "all":
+            for device in self._devices.values():
+                mode = normalize_mute_mode(device.get("mute_mode"))
+                if mode and mode.get("scope") == "all":
+                    device["mute_mode"] = None
+        else:
+            self._devices[device_id]["mute_mode"] = None
+        await self.async_save()
+        return active
+
+    def active_mute_mode_for_device(self, device_id: str) -> dict[str, Any] | None:
+        """Return active mute mode for a device and prune expired modes."""
+        device = self._devices.get(device_id)
+        if not device:
+            return None
+        mode = active_mute_mode_for_device(
+            device.get("mute_mode"),
+            device_id=device_id,
+        )
+        if mode is None and device.get("mute_mode") is not None:
+            device["mute_mode"] = None
+        return mode
+
     @staticmethod
     def _prune_expired_mutes(device: dict[str, Any]) -> list[dict[str, Any]]:
         """Remove expired mute entries in-place and return the remaining list."""
@@ -756,14 +900,21 @@ class DeviceManager:
     @staticmethod
     def _find_camera_group(
         camera: str | None,
-        groups: dict[str, list[str]],
+        groups: dict[str, list[str]] | list[dict[str, Any]],
     ) -> str | None:
         """Return the group name a camera belongs to, or None."""
         if not camera or not groups:
             return None
-        for group_name, cameras in groups.items():
-            if camera in cameras:
-                return group_name
+        if isinstance(groups, dict):
+            for group_name, cameras in groups.items():
+                if camera in cameras:
+                    return group_name
+            return None
+        for group in groups:
+            if not isinstance(group, dict) or not group.get("enabled", True):
+                continue
+            if camera in group.get("cameras", []):
+                return str(group.get("name") or "").strip() or None
         return None
 
     async def async_get_devices_for_notification(
@@ -777,6 +928,7 @@ class DeviceManager:
         cooldown_key: str | None = None,
         camera_groups: dict[str, list[str]] | None = None,
         cross_camera_cooldown_seconds: int = 120,
+        cross_camera_signature: str | None = None,
     ) -> list[dict[str, Any]]:
         """Get devices that should receive a notification based on filters."""
         devices_to_notify = []
@@ -794,6 +946,7 @@ class DeviceManager:
                 confidence_percent = None
 
         for device in self._devices.values():
+            device.pop("_cross_camera_update_candidate", None)
             settings = self.normalize_notification_settings(
                 device.get("notification_settings")
             )
@@ -812,6 +965,19 @@ class DeviceManager:
             if self._is_muted(active_mutes, camera, label):
                 _LOGGER.debug(
                     "Skipping device %s: camera=%s label=%s is muted",
+                    device.get("id"), camera, label,
+                )
+                continue
+
+            if should_mute_event(
+                device.get("mute_mode"),
+                device_id=str(device.get("id") or ""),
+                camera=camera,
+                label=label,
+                sub_label=sub_label,
+            ):
+                _LOGGER.debug(
+                    "Skipping device %s: mute mode active for camera=%s label=%s",
                     device.get("id"), camera, label,
                 )
                 continue
@@ -912,26 +1078,33 @@ class DeviceManager:
                     continue
                 self._cooldowns[device_cooldown_key] = now
 
-            # Cross-camera deduplication: suppress notifications for the same
-            # label from cameras in the same group within a cooldown window.
+            # Cross-camera grouping is handled by the coordinator so repeated
+            # grouped-camera hits can update the existing notification in
+            # place instead of being dropped here.
+            effective_camera_groups = camera_groups or settings.get("camera_groups", [])
             if (
-                camera_groups
+                effective_camera_groups
                 and settings.get("cross_camera_dedup_enabled", True)
             ):
-                group_name = self._find_camera_group(camera, camera_groups)
+                group_name = self._find_camera_group(camera, effective_camera_groups)
                 if group_name:
+                    device_cross_camera_seconds = settings.get(
+                        "cross_camera_dedup_seconds",
+                        cross_camera_cooldown_seconds,
+                    )
                     xgroup_key = (
                         f"{device['id']}:{normalized_kind}:xgroup:"
-                        f"{group_name}:{label or ''}"
+                        f"{group_name}:{cross_camera_signature or label or ''}"
                     )
                     last_group_sent = self._cooldowns.get(xgroup_key)
-                    if (
-                        last_group_sent
-                        and cross_camera_cooldown_seconds > 0
-                        and (now - last_group_sent).total_seconds()
-                        < cross_camera_cooldown_seconds
-                    ):
-                        continue
+                    if last_group_sent and device_cross_camera_seconds > 0:
+                        elapsed = (now - last_group_sent).total_seconds()
+                        if elapsed < device_cross_camera_seconds:
+                            device["_cross_camera_update_candidate"] = {
+                                "group": group_name,
+                                "signature": cross_camera_signature or label or "",
+                                "elapsed_seconds": elapsed,
+                            }
                     self._cooldowns[xgroup_key] = now
 
             devices_to_notify.append(device)

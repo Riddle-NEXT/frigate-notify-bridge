@@ -42,6 +42,13 @@ from .qr_generator import (
     generate_qr_code_base64,
     generate_qr_code_image,
 )
+from .smart_rules import (
+    SmartRule,
+    apply_feedback_to_rule,
+    discover_smart_rule_candidates,
+    normalize_smart_rules,
+    sessions_matching_rule,
+)
 
 if TYPE_CHECKING:
     from .coordinator import FrigateNotifyCoordinator
@@ -186,6 +193,11 @@ async def async_setup_api(
     hass.http.register_view(DeviceTokenView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceMutesView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceMuteDetailView(entry, coordinator, device_manager))
+    hass.http.register_view(DeviceMuteModeView(entry, coordinator, device_manager))
+    hass.http.register_view(SmartRulesView(entry, coordinator, device_manager))
+    hass.http.register_view(SmartRuleCandidatesView(entry, coordinator, device_manager))
+    hass.http.register_view(SmartRuleMatchesView(entry, coordinator, device_manager))
+    hass.http.register_view(SmartRuleFeedbackView(entry, coordinator, device_manager))
     hass.http.register_view(ConfigView(entry, coordinator, device_manager))
     hass.http.register_view(StatusView(entry, coordinator, device_manager, issue_manager=issue_manager))
     hass.http.register_view(TestNotificationView(entry, coordinator, device_manager))
@@ -781,6 +793,242 @@ class DeviceMuteDetailView(BaseAPIView):
             return web.json_response({"error": "Mute not found"}, status=404)
 
         return web.json_response({"success": True})
+
+
+class DeviceMuteModeView(BaseAPIView):
+    """Manage device or bridge-wide mute mode."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/mute_mode"
+    name = "api:frigate_notify_bridge:device_mute_mode"
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        """Return active mute mode and saved mute-mode settings."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        device = await self.device_manager.async_get_device(device_id)
+        if not device:
+            return web.json_response({"error": "Device not found"}, status=404)
+        settings = self.device_manager.normalize_notification_settings(
+            device.get("notification_settings")
+        )
+        return web.json_response({
+            "mute_mode": self.device_manager.active_mute_mode_for_device(device_id),
+            "settings": settings.get("mute_mode", {}),
+        })
+
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
+        """Activate mute mode for this device or all devices."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        mode = await self.device_manager.async_activate_mute_mode(
+            device_id,
+            duration_minutes=data.get("duration_minutes", 30),
+            scope=str(data.get("scope") or "device"),
+            important_labels=(
+                data.get("important_labels")
+                if isinstance(data.get("important_labels"), list)
+                else None
+            ),
+            important_sub_labels=(
+                data.get("important_sub_labels")
+                if isinstance(data.get("important_sub_labels"), list)
+                else None
+            ),
+            live_activity_enabled=(
+                bool(data.get("live_activity_enabled"))
+                if "live_activity_enabled" in data
+                else None
+            ),
+            reason=str(data.get("reason") or "manual"),
+        )
+        if mode is None:
+            return web.json_response({"error": "Device not found"}, status=404)
+        await self.coordinator.async_send_mute_mode_status(mode, ended=False)
+        return web.json_response({"success": True, "mute_mode": mode})
+
+    async def delete(self, request: web.Request, device_id: str) -> web.Response:
+        """End active mute mode for this device or all devices."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        scope = request.query.get("scope")
+        ended = await self.device_manager.async_end_mute_mode(device_id, scope=scope)
+        if ended is None:
+            return web.json_response({"error": "Device not found"}, status=404)
+        await self.coordinator.async_send_mute_mode_status(ended, ended=True)
+        return web.json_response({"success": True, "mute_mode": None})
+
+
+async def _fetch_recent_frigate_events(
+    request: web.Request,
+    coordinator: FrigateNotifyCoordinator,
+    entry: ConfigEntry,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Fetch recent Frigate events for smart-rule mining."""
+    frigate_url = entry.data.get(CONF_FRIGATE_URL)
+    if not frigate_url:
+        return []
+
+    session = async_get_clientsession(request.app["hass"])
+    headers: dict[str, str] = {}
+    token = None
+    try:
+        token = await coordinator._async_get_frigate_access_token()  # noqa: SLF001
+    except Exception as err:
+        _LOGGER.debug("Could not get Frigate access token for smart rules: %s", err)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    url = f"{str(frigate_url).rstrip('/')}/api/events?limit={limit}"
+    async with session.get(url, headers=headers, ssl=False, timeout=15) as response:
+        if response.status != 200:
+            body = await response.text()
+            raise web.HTTPBadGateway(
+                reason=f"Frigate events request failed: HTTP {response.status} {body[:120]}"
+            )
+        payload = await response.json()
+        return payload if isinstance(payload, list) else []
+
+
+class SmartRulesView(BaseAPIView):
+    """Read and update smart notification rules for a device."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/smart_rules"
+    name = "api:frigate_notify_bridge:smart_rules"
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        """Return configured smart rules."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        device = await self.device_manager.async_get_device(device_id)
+        if not device:
+            return web.json_response({"error": "Device not found"}, status=404)
+        settings = self.device_manager.normalize_notification_settings(
+            device.get("notification_settings")
+        )
+        return web.json_response({"smart_rules": settings.get("smart_rules", [])})
+
+    async def patch(self, request: web.Request, device_id: str) -> web.Response:
+        """Replace configured smart rules."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        device = await self.device_manager.async_get_device(device_id)
+        if not device:
+            return web.json_response({"error": "Device not found"}, status=404)
+        settings = dict(device.get("notification_settings") or {})
+        settings["smart_rules"] = normalize_smart_rules(data.get("smart_rules"))
+        updated = await self.device_manager.async_update_device(
+            device_id,
+            {"notification_settings": settings},
+        )
+        return web.json_response({
+            "success": True,
+            "smart_rules": updated.get("notification_settings", {}).get("smart_rules", []),
+        })
+
+
+class SmartRuleCandidatesView(BaseAPIView):
+    """Discover likely smart rules from recent Frigate events."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/smart_rules/candidates"
+    name = "api:frigate_notify_bridge:smart_rule_candidates"
+
+    async def get(self, request: web.Request, device_id: str) -> web.Response:
+        """Return mined smart-rule candidates."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            limit = int(request.query.get("limit", "500"))
+        except (TypeError, ValueError):
+            limit = 500
+        limit = max(50, min(3000, limit))
+        events = await _fetch_recent_frigate_events(
+            request,
+            self.coordinator,
+            self.entry,
+            limit=limit,
+        )
+        return web.json_response({
+            "candidates": discover_smart_rule_candidates(events),
+            "event_count": len(events),
+        })
+
+
+class SmartRuleMatchesView(BaseAPIView):
+    """Preview historical sessions that match a candidate or configured rule."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/smart_rules/matches"
+    name = "api:frigate_notify_bridge:smart_rule_matches"
+
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
+        """Return matching sessions for the posted rule."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        rule_data = data.get("rule")
+        if not isinstance(rule_data, dict):
+            return web.json_response({"error": "Missing rule"}, status=400)
+        try:
+            limit = int(data.get("limit", 500))
+        except (TypeError, ValueError):
+            limit = 500
+        events = await _fetch_recent_frigate_events(
+            request,
+            self.coordinator,
+            self.entry,
+            limit=max(50, min(3000, limit)),
+        )
+        rule = SmartRule.from_dict(rule_data)
+        return web.json_response({
+            "matches": sessions_matching_rule(rule, events),
+            "event_count": len(events),
+        })
+
+
+class SmartRuleFeedbackView(BaseAPIView):
+    """Apply validation feedback to a smart rule."""
+
+    url = f"{API_BASE_PATH}/devices/{{device_id}}/smart_rules/feedback"
+    name = "api:frigate_notify_bridge:smart_rule_feedback"
+
+    async def post(self, request: web.Request, device_id: str) -> web.Response:
+        """Return an updated rule after user feedback."""
+        resolved_device_id = self._resolve_owned_device_id(request, device_id)
+        if resolved_device_id != device_id:
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+
+        rule_data = data.get("rule")
+        feedback = data.get("feedback")
+        if not isinstance(rule_data, dict) or not isinstance(feedback, dict):
+            return web.json_response({"error": "Missing rule or feedback"}, status=400)
+        updated_rule = apply_feedback_to_rule(rule_data, feedback)
+        return web.json_response({"rule": updated_rule.to_dict()})
 
 
 class ConfigView(BaseAPIView):
@@ -1622,6 +1870,8 @@ class FrigateMediaView(BaseAPIView):
             return f"{frigate_url}/api/events/{media_id}/thumbnail.jpg"
         if media_kind == "event_snapshot":
             return f"{frigate_url}/api/events/{media_id}/snapshot.jpg"
+        if media_kind == "event_snapshot_bbox":
+            return f"{frigate_url}/api/events/{media_id}/snapshot.jpg?bbox=1"
         if media_kind == "event_clip":
             return f"{frigate_url}/api/events/{media_id}/clip.mp4"
         if media_kind == "event_preview_gif":
@@ -1656,6 +1906,27 @@ class FrigateMediaView(BaseAPIView):
                 f"{frigate_url}/clips/faces/"
                 f"{quote(face_name, safe='')}/{quote(image_id, safe='')}"
             )
+        return None
+
+    @staticmethod
+    def _resolve_thumb_path_target(
+        frigate_url: str,
+        thumb_path: str | None,
+    ) -> str | None:
+        """Translate a Frigate review thumb_path into a fetchable upstream URL."""
+        if not thumb_path:
+            return None
+
+        normalized = thumb_path.strip()
+        if not normalized:
+            return None
+
+        if normalized.startswith("/api/") or normalized.startswith("/clips/"):
+            return f"{frigate_url}{normalized}"
+        if normalized.startswith("/media/frigate/"):
+            return f"{frigate_url}{normalized.removeprefix('/media/frigate')}"
+        if normalized.startswith("media/frigate/"):
+            return f"{frigate_url}/{normalized.removeprefix('media/frigate/')}"
         return None
 
     async def _resolve_review_thumbnail_url(
@@ -1695,8 +1966,9 @@ class FrigateMediaView(BaseAPIView):
             return f"{frigate_url}/api/events/{detections[0]}/thumbnail.jpg"
 
         thumb_path = payload.get("thumb_path")
-        if thumb_path and thumb_path.startswith("/api/"):
-            return f"{frigate_url}{thumb_path}"
+        thumb_target = self._resolve_thumb_path_target(frigate_url, thumb_path)
+        if thumb_target:
+            return thumb_target
 
         return f"{frigate_url}/api/review/{review_id}/preview?format=gif"
 
@@ -1723,6 +1995,12 @@ class FrigateMediaView(BaseAPIView):
         detections = payload.get("data", {}).get("detections") or []
         if detections:
             return f"{frigate_url}/api/events/{detections[0]}/thumbnail.jpg"
+        thumb_target = self._resolve_thumb_path_target(
+            frigate_url,
+            payload.get("thumb_path"),
+        )
+        if thumb_target:
+            return thumb_target
         return None
 
     async def get(
@@ -1735,37 +2013,45 @@ class FrigateMediaView(BaseAPIView):
         device_id = request.query.get("device_id", "").strip()
         signature = request.query.get("sig", "").strip()
         expires_raw = request.query.get("expires", "").strip()
-        try:
-            expires = int(expires_raw)
-        except (TypeError, ValueError):
-            return web.json_response({"error": "Invalid expiration"}, status=400)
+        has_signature = bool(device_id and signature and expires_raw)
 
-        if not device_id or not signature:
-            return web.json_response({"error": "Missing signature"}, status=401)
+        if has_signature:
+            try:
+                expires = int(expires_raw)
+            except (TypeError, ValueError):
+                return web.json_response({"error": "Invalid expiration"}, status=400)
 
-        if not self.device_manager.validate_media_signature(
-            device_id=device_id,
-            media_kind=media_kind,
-            media_id=media_id,
-            expires=expires,
-            signature=signature,
-        ):
-            expected = self.device_manager.create_media_signature(
-                device_id,
-                media_kind,
-                media_id,
-                expires,
+            if not self.device_manager.validate_media_signature(
+                device_id=device_id,
+                media_kind=media_kind,
+                media_id=media_id,
+                expires=expires,
+                signature=signature,
+            ):
+                expected = self.device_manager.create_media_signature(
+                    device_id,
+                    media_kind,
+                    media_id,
+                    expires,
+                )
+                _LOGGER.warning(
+                    "Invalid media signature: device_id=%s media_kind=%s media_id=%s expires=%s received=%s expected=%s",
+                    device_id,
+                    media_kind,
+                    media_id,
+                    expires,
+                    signature,
+                    expected,
+                )
+                return web.json_response({"error": "Invalid signature"}, status=401)
+        else:
+            authenticated_device_id = self._resolve_owned_device_id(
+                request,
+                requested_device_id=device_id or None,
             )
-            _LOGGER.warning(
-                "Invalid media signature: device_id=%s media_kind=%s media_id=%s expires=%s received=%s expected=%s",
-                device_id,
-                media_kind,
-                media_id,
-                expires,
-                signature,
-                expected,
-            )
-            return web.json_response({"error": "Invalid signature"}, status=401)
+            if not authenticated_device_id:
+                return web.json_response({"error": "Missing signature"}, status=401)
+            device_id = authenticated_device_id
 
         session = async_get_clientsession(request.app["hass"])
         headers = _proxy_request_headers(request)

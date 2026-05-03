@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 import logging
+import time
 from datetime import datetime
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlencode
@@ -28,6 +29,7 @@ import json as _json
 from .cross_camera import CrossCameraCorrelator, CorrelationRecord, compose_snapshot_image
 from .issues import ISSUE_NOTIFICATION_DELIVERY
 from .push_providers.base import NotificationPayload, SendResult
+from .smart_rules import smart_rule_runtime_match
 
 if TYPE_CHECKING:
     from .device_manager import DeviceManager
@@ -56,6 +58,14 @@ def _normalize_event_kind(kind: Any) -> str:
     return normalized
 
 
+def _coerce_timestamp(value: Any, *, default: float) -> float:
+    """Parse Frigate timestamps while tolerating missing MQTT fields."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _display_label(raw_label: Any) -> str:
     """Format model labels for user-facing notification copy."""
     label = str(raw_label or "object").strip()
@@ -82,6 +92,24 @@ def _is_modifier_sub_label(sub_label: str) -> bool:
     }
 
 
+def _object_signature(event_data: dict[str, Any]) -> str:
+    """Return the stable object set used for cooldown and cross-camera dedupe."""
+    objects = [
+        str(item).strip().lower()
+        for item in event_data.get("objects", []) or []
+        if str(item).strip()
+    ]
+    if not objects:
+        label = str(event_data.get("label") or "object").strip().lower()
+        objects = [label or "object"]
+
+    sub_label = str(event_data.get("sub_label") or "").strip().lower()
+    if sub_label:
+        objects.append(f"sub:{sub_label}")
+
+    return "|".join(sorted(objects))
+
+
 class FrigateNotifyCoordinator:
     """Coordinate notifications between Frigate events and push providers."""
 
@@ -105,6 +133,8 @@ class FrigateNotifyCoordinator:
         self.last_event_at: str | None = None
         self.mqtt_subscribed: bool = False
         self._correlator = CrossCameraCorrelator()
+        self._smart_rule_recent_events: list[dict[str, Any]] = []
+        self._mute_mode_end_handles: dict[str, asyncio.TimerHandle] = {}
 
         # Set up Frigate auth if configured
         username = entry.data.get(CONF_FRIGATE_USERNAME)
@@ -135,6 +165,9 @@ class FrigateNotifyCoordinator:
         zones = event_data.get("zones", [])
         score = event_data.get("score", 0)
         event_kind = _normalize_event_kind(event_data.get("event_kind", "recording"))
+        object_signature = _object_signature(event_data)
+        recent_smart_rule_events = list(self._smart_rule_recent_events)
+        self._remember_smart_rule_event(event_data)
 
         _LOGGER.debug(
             "Processing %s notification: event=%s review=%s camera=%s label=%s",
@@ -157,9 +190,13 @@ class FrigateNotifyCoordinator:
             sub_label=event_data.get("sub_label"),
             zones=zones,
             confidence=score,
-            cooldown_key=f"{event_kind}:{review_id or event_id or camera}:{label or ''}",
+            cooldown_key=(
+                f"{event_kind}:{review_id or event_id or camera}:"
+                f"{object_signature}"
+            ),
             camera_groups=camera_groups,
             cross_camera_cooldown_seconds=cross_camera_cooldown,
+            cross_camera_signature=object_signature,
         )
 
         if not devices:
@@ -181,6 +218,11 @@ class FrigateNotifyCoordinator:
 
             settings = device.get("notification_settings", {})
             group = self._correlator.find_device_camera_group(camera or "", settings)
+            smart_match = smart_rule_runtime_match(
+                settings.get("smart_rules", []),
+                event_data,
+                recent_events=recent_smart_rule_events,
+            )
 
             if group and camera and label:
                 # Cross-camera correlation path
@@ -188,8 +230,9 @@ class FrigateNotifyCoordinator:
                     group_name=group["name"],
                     camera=camera,
                     label=label,
+                    object_signature=object_signature,
                     event_id=event_id or "",
-                    score=score,
+                    score=float(score or 0),
                     time_window=group.get("time_window_seconds", 10),
                 )
                 if is_update:
@@ -203,6 +246,28 @@ class FrigateNotifyCoordinator:
                     )
             else:
                 payload = await self._build_notification_payload(event_data, device)
+
+            if smart_match:
+                rule = smart_match["rule"]
+                payload.notification_tag = (
+                    payload.notification_tag
+                    or f"smart_mode_{rule.get('id') or rule.get('mode_type')}"
+                )
+                payload.data = dict(payload.data or {})
+                payload.data.update({
+                    "smart_mode": "1",
+                    "smart_mode_id": str(rule.get("id") or ""),
+                    "smart_mode_name": str(rule.get("name") or "Smart mode"),
+                    "smart_mode_action": str(smart_match.get("action") or "update"),
+                    "smart_mode_confidence": str(
+                        int(float(smart_match.get("confidence") or 0) * 100)
+                    ),
+                })
+                payload.title = f"{rule.get('name') or 'Smart mode'} active"
+                payload.body = (
+                    f"{payload.camera or camera or 'Camera'} matched "
+                    f"{label or 'activity'}; updating this mode instead of sending repeats."
+                )
 
             _LOGGER.info(
                 "Sending %s notification to device %s for event=%s review=%s tag=%s",
@@ -291,6 +356,30 @@ class FrigateNotifyCoordinator:
         else:
             await self.issue_manager.async_clear_issue(ISSUE_NOTIFICATION_DELIVERY)
             _LOGGER.debug("All %d notifications sent successfully", success_count)
+
+    def _remember_smart_rule_event(self, event_data: dict[str, Any]) -> None:
+        """Keep a small rolling event window for session-aware smart rules."""
+        now = time.time()
+        event_time = _coerce_timestamp(
+            event_data.get("start_time") or event_data.get("timestamp"),
+            default=now,
+        )
+        remembered = dict(event_data)
+        remembered.setdefault("start_time", event_time)
+        remembered.setdefault("end_time", event_data.get("end_time") or event_time)
+        self._smart_rule_recent_events.append(remembered)
+        cutoff = now - 2 * 3600
+        self._smart_rule_recent_events = [
+            event
+            for event in self._smart_rule_recent_events[-500:]
+            if _coerce_timestamp(
+                event.get("end_time")
+                or event.get("start_time")
+                or event.get("timestamp"),
+                default=now,
+            )
+            >= cutoff
+        ]
 
     async def _build_notification_payload(
         self,
@@ -410,6 +499,91 @@ class FrigateNotifyCoordinator:
             sub_label=str(sub_label) if sub_label else None,
             zones=zones,
             notification_tag=notification_tag,
+        )
+
+    async def async_send_mute_mode_status(
+        self,
+        mode: dict[str, Any],
+        *,
+        ended: bool,
+    ) -> None:
+        """Notify devices that mute mode started or ended."""
+        from .push_providers.relay import RelayPushProvider
+
+        use_relay = isinstance(self.push_provider, RelayPushProvider)
+        scope = str(mode.get("scope") or "device")
+        creator = str(mode.get("created_by_name") or "another device").strip()
+        title = "Mute mode ended" if ended else "Mute mode active"
+        if ended:
+            body = "Notifications have returned to normal."
+        else:
+            scope_text = "all devices" if scope == "all" else "this device"
+            body = f"{creator} muted routine alerts for {scope_text}."
+        data = {
+            "type": "mute_mode",
+            "mute_mode": "ended" if ended else "active",
+            "mute_mode_scope": scope,
+            "mute_mode_id": str(mode.get("id") or ""),
+            "mute_mode_expires_at": str(mode.get("expires_at") or ""),
+            "important_labels": ",".join(mode.get("important_labels") or []),
+            "live_activity_enabled": "1"
+            if mode.get("live_activity_enabled")
+            else "0",
+        }
+        devices = (await self.device_manager.async_get_devices()).values()
+        for device in devices:
+            if device.get("subscription_active") is False:
+                continue
+            if scope == "device" and device.get("id") != mode.get("device_id"):
+                continue
+            token = _device_target(device, use_relay)
+            if not token:
+                continue
+            settings = self.device_manager.normalize_notification_settings(
+                device.get("notification_settings")
+            ).get("mute_mode", {})
+            if ended and not settings.get("notify_on_end", True):
+                continue
+            if not ended and not settings.get("notify_on_start", True):
+                continue
+            payload = NotificationPayload(
+                title=title,
+                body=body,
+                data=data,
+                priority="normal",
+                notification_tag=f"mute_mode_{mode.get('id') or scope}",
+            )
+            await self.push_provider.async_send(token, payload)
+        if not ended:
+            self._schedule_mute_mode_end_update(mode)
+
+    def _schedule_mute_mode_end_update(self, mode: dict[str, Any]) -> None:
+        """Schedule the configured end update for a mute mode."""
+        mode_id = str(mode.get("id") or "")
+        if not mode_id:
+            return
+        existing = self._mute_mode_end_handles.pop(mode_id, None)
+        if existing:
+            existing.cancel()
+        try:
+            delay = max(0, float(mode.get("expires_at")) - time.time())
+        except (TypeError, ValueError):
+            return
+
+        async def _end_if_current() -> None:
+            ended = await self.device_manager.async_end_mute_mode(
+                str(mode.get("created_by_device_id") or mode.get("device_id") or ""),
+                scope=str(mode.get("scope") or "device"),
+            )
+            if ended:
+                await self.async_send_mute_mode_status(ended, ended=True)
+
+        def _schedule_task() -> None:
+            self.hass.async_create_task(_end_if_current())
+
+        self._mute_mode_end_handles[mode_id] = self.hass.loop.call_later(
+            delay,
+            _schedule_task,
         )
 
     async def _build_cross_camera_update_payload(

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,6 +26,7 @@ class CorrelationRecord:
 
     group_name: str
     label: str
+    object_signature: str
     first_camera: str
     event_id: str
     notification_tag: str
@@ -56,11 +58,20 @@ class CrossCameraCorrelator:
     """In-memory correlator for cross-camera alert groups."""
 
     def __init__(self) -> None:
-        # key: "{group_name}:{label}" -> CorrelationRecord
+        # key: "{group_name}:{label}:{object_signature}" -> CorrelationRecord
         self._active: dict[str, CorrelationRecord] = {}
 
-    def _correlation_key(self, group_name: str, label: str) -> str:
-        return f"{group_name}:{label}"
+    def _correlation_key(
+        self,
+        group_name: str,
+        label: str,
+        object_signature: str,
+    ) -> str:
+        return f"{group_name}:{label}:{object_signature}"
+
+    def _tag_part(self, value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", value.strip())
+        return cleaned.strip("_")[:80] or "object"
 
     def cleanup(self) -> None:
         """Remove stale correlation records."""
@@ -91,6 +102,7 @@ class CrossCameraCorrelator:
         group_name: str,
         camera: str,
         label: str,
+        object_signature: str,
         event_id: str,
         score: float,
         time_window: int,
@@ -103,7 +115,8 @@ class CrossCameraCorrelator:
           send an update notification.
         """
         self.cleanup()
-        key = self._correlation_key(group_name, label)
+        normalized_signature = object_signature.strip() or label
+        key = self._correlation_key(group_name, label, normalized_signature)
         now = time.time()
 
         existing = self._active.get(key)
@@ -113,10 +126,14 @@ class CrossCameraCorrelator:
             return True, existing
 
         # First camera — create a new correlation record
-        tag = f"xcam_{group_name}_{label}_{int(now)}"
+        tag = (
+            f"xcam_{self._tag_part(group_name)}_"
+            f"{self._tag_part(normalized_signature)}_{int(now)}"
+        )
         record = CorrelationRecord(
             group_name=group_name,
             label=label,
+            object_signature=normalized_signature,
             first_camera=camera,
             event_id=event_id,
             notification_tag=tag,
