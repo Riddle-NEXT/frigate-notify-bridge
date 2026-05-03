@@ -33,6 +33,10 @@ class NotificationPayload:
     # on the device (e.g. cross-camera alert updates).
     notification_tag: str | None = None
 
+    # Optional platform live-status request for providers that support native
+    # live activities / live update notifications.
+    live_activity: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         result = {
@@ -62,6 +66,8 @@ class NotificationPayload:
             result["zones"] = self.zones
         if self.notification_tag:
             result["notification_tag"] = self.notification_tag
+        if self.live_activity:
+            result["live_activity"] = self.live_activity
         return result
 
 

@@ -524,12 +524,43 @@ class FrigateNotifyCoordinator:
             "mute_mode": "ended" if ended else "active",
             "mute_mode_scope": scope,
             "mute_mode_id": str(mode.get("id") or ""),
+            "mute_mode_started_at": str(mode.get("started_at") or ""),
             "mute_mode_expires_at": str(mode.get("expires_at") or ""),
             "important_labels": ",".join(mode.get("important_labels") or []),
             "live_activity_enabled": "1"
             if mode.get("live_activity_enabled")
             else "0",
         }
+        started_at = float(mode.get("started_at") or time.time())
+        expires_at = float(mode.get("expires_at") or time.time())
+        important_labels = list(mode.get("important_labels") or ["package"])
+        live_activity = None
+        if mode.get("live_activity_enabled"):
+            live_activity = {
+                "event": "end" if ended else "start",
+                "tokenType": "update" if ended else "push_to_start",
+                "attributesType": "MuteModeAttributes",
+                "attributes": None if ended else {
+                    "modeId": str(mode.get("id") or "mute-mode"),
+                    "scope": scope,
+                    "createdByName": creator,
+                },
+                "contentState": {
+                    "title": title,
+                    "body": body,
+                    "startedAt": started_at,
+                    "expiresAt": expires_at,
+                    "importantLabels": important_labels,
+                },
+                "timestamp": int(time.time()),
+                "dismissalDate": int(time.time()) if ended else None,
+                "suppressStandardPush": True,
+            }
+            live_activity = {
+                key: value
+                for key, value in live_activity.items()
+                if value is not None
+            }
         devices = (await self.device_manager.async_get_devices()).values()
         for device in devices:
             if device.get("subscription_active") is False:
@@ -552,6 +583,7 @@ class FrigateNotifyCoordinator:
                 data=data,
                 priority="normal",
                 notification_tag=f"mute_mode_{mode.get('id') or scope}",
+                live_activity=live_activity,
             )
             await self.push_provider.async_send(token, payload)
         if not ended:

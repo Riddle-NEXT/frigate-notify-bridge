@@ -166,6 +166,10 @@ class RelayPushProvider(PushProvider):
             camera=payload.camera,
             label=payload.label,
             zones=list(payload.zones) if payload.zones else None,
+            notification_tag=payload.notification_tag,
+            live_activity=copy.deepcopy(payload.live_activity)
+            if payload.live_activity
+            else None,
         )
 
         if level >= 1:
@@ -435,10 +439,12 @@ class RelayPushProvider(PushProvider):
             "threadId": payload.camera or "frigate-mobile",
             "notificationData": self._build_notification_data(payload),
         }
-        # Include notification_tag as collapseKey so FCM replaces existing
+        # Include notification_tag as collapseId so FCM replaces existing
         # notifications with the same tag (used for cross-camera updates).
         if payload.notification_tag:
-            body["collapseKey"] = payload.notification_tag
+            body["collapseId"] = payload.notification_tag
+        if payload.live_activity:
+            body["liveActivity"] = payload.live_activity
 
         # Validate and catch size errors early
         try:
