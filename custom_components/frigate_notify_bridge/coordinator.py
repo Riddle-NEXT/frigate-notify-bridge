@@ -589,6 +589,49 @@ class FrigateNotifyCoordinator:
         if not ended:
             self._schedule_mute_mode_end_update(mode)
 
+    async def async_send_smart_mode_status(
+        self,
+        device: dict[str, Any],
+        rule: dict[str, Any],
+        *,
+        ended: bool,
+    ) -> None:
+        """Notify a device that a smart alert mode started or ended."""
+        from .push_providers.relay import RelayPushProvider
+
+        if device.get("subscription_active") is False:
+            return
+
+        token = _device_target(
+            device,
+            isinstance(self.push_provider, RelayPushProvider),
+        )
+        if not token:
+            return
+
+        rule_id = str(rule.get("id") or rule.get("mode_type") or "")
+        rule_name = str(rule.get("name") or "Smart mode")
+        title = f"{rule_name} ended" if ended else f"{rule_name} active"
+        body = (
+            "Rule deleted or disabled. Matching alerts are back to normal."
+            if ended
+            else "Matching alerts will update this mode instead of sending repeats."
+        )
+        payload = NotificationPayload(
+            title=title,
+            body=body,
+            data={
+                "type": "smart_mode",
+                "smart_mode": "ended" if ended else "active",
+                "smart_mode_id": rule_id,
+                "smart_mode_name": rule_name,
+                "smart_mode_action": "ended" if ended else "update",
+            },
+            priority="normal",
+            notification_tag=f"smart_mode_{rule_id or rule.get('mode_type')}",
+        )
+        await self.push_provider.async_send(token, payload)
+
     def _schedule_mute_mode_end_update(self, mode: dict[str, Any]) -> None:
         """Schedule the configured end update for a mute mode."""
         mode_id = str(mode.get("id") or "")

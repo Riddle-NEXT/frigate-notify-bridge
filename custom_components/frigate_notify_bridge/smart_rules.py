@@ -123,6 +123,28 @@ def normalize_smart_rules(raw: Any) -> list[dict[str, Any]]:
     return [SmartRule.from_dict(item).to_dict() for item in raw if isinstance(item, dict)]
 
 
+def smart_rules_removed_or_disabled(
+    previous: list[dict[str, Any]],
+    current: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return rules that were enabled before but are now removed or disabled."""
+    current_by_id = {_rule_identity(rule): rule for rule in current}
+    changed: list[dict[str, Any]] = []
+    for rule in previous:
+        if rule.get("enabled") is False:
+            continue
+        rule_id = _rule_identity(rule)
+        replacement = current_by_id.get(rule_id)
+        if replacement is None or replacement.get("enabled") is False:
+            changed.append(rule)
+    return changed
+
+
+def _rule_identity(rule: dict[str, Any]) -> str:
+    """Return the stable ID used by smart-mode notification tags."""
+    return str(rule.get("id") or rule.get("name") or rule.get("mode_type") or "")
+
+
 def discover_smart_rule_candidates(
     events: list[dict[str, Any]],
     *,

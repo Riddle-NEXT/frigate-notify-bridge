@@ -48,6 +48,7 @@ from .smart_rules import (
     discover_smart_rule_candidates,
     normalize_smart_rules,
     sessions_matching_rule,
+    smart_rules_removed_or_disabled,
 )
 
 if TYPE_CHECKING:
@@ -931,15 +932,29 @@ class SmartRulesView(BaseAPIView):
         device = await self.device_manager.async_get_device(device_id)
         if not device:
             return web.json_response({"error": "Device not found"}, status=404)
+        previous_settings = self.device_manager.normalize_notification_settings(
+            device.get("notification_settings")
+        )
+        previous_rules = previous_settings.get("smart_rules", [])
+        next_rules = normalize_smart_rules(data.get("smart_rules"))
+        ended_rules = smart_rules_removed_or_disabled(previous_rules, next_rules)
         settings = dict(device.get("notification_settings") or {})
-        settings["smart_rules"] = normalize_smart_rules(data.get("smart_rules"))
+        settings["smart_rules"] = next_rules
         updated = await self.device_manager.async_update_device(
             device_id,
             {"notification_settings": settings},
         )
+        if ended_rules and updated:
+            for rule in ended_rules:
+                await self.coordinator.async_send_smart_mode_status(
+                    updated,
+                    rule,
+                    ended=True,
+                )
         return web.json_response({
             "success": True,
             "smart_rules": updated.get("notification_settings", {}).get("smart_rules", []),
+            "ended_rules": ended_rules,
         })
 
 

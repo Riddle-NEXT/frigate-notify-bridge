@@ -12,11 +12,33 @@ from smart_rules import (
     apply_feedback_to_rule,
     discover_smart_rule_candidates,
     smart_rule_runtime_match,
+    smart_rules_removed_or_disabled,
     sessions_matching_rule,
 )
 
 
 class SmartRulesTest(unittest.TestCase):
+    def test_removed_or_disabled_rules_detects_active_modes_to_end(self):
+        previous = [
+            {"id": "mowing", "name": "Mowing", "enabled": True},
+            {"id": "dogs", "name": "Dogs", "enabled": True},
+            {"id": "old", "name": "Old", "enabled": False},
+        ]
+        current = [
+            {"id": "dogs", "name": "Dogs", "enabled": False},
+            {"id": "new", "name": "New", "enabled": True},
+        ]
+
+        ended = smart_rules_removed_or_disabled(previous, current)
+
+        self.assertEqual([rule["id"] for rule in ended], ["mowing", "dogs"])
+
+    def test_removed_or_disabled_rules_ignores_unchanged_enabled_rules(self):
+        previous = [{"id": "mowing", "name": "Mowing", "enabled": True}]
+        current = [{"id": "mowing", "name": "Mowing", "enabled": True}]
+
+        self.assertEqual(smart_rules_removed_or_disabled(previous, current), [])
+
     def test_discovers_mowing_candidate_from_robot_mower_events(self):
         events = [
             {
