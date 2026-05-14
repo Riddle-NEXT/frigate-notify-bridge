@@ -355,6 +355,29 @@ class RelayPushProvider(PushProvider):
             success=False, device_id=device_token, error="No result"
         )
 
+    async def async_send_to_device(
+        self,
+        device: dict[str, Any],
+        device_token: str,
+        payload: NotificationPayload,
+    ) -> SendResult:
+        """Send to a device and include repair metadata for relay registration.
+
+        The central relay can lose a device record when FCM marks a token
+        invalid or when the relay TTL expires. Home Assistant still has the
+        paired device and latest FCM token, so include that metadata on signed
+        bridge requests and let the relay recreate missing/expired records.
+        """
+        repair = self._build_repair_registration(device, device_token)
+        results = await self._send_to_many(
+            [device_token],
+            payload,
+            repair_registrations=[repair] if repair else None,
+        )
+        return results[0] if results else SendResult(
+            success=False, device_id=device_token, error="No result"
+        )
+
     async def async_send_to_many(
         self,
         device_tokens: list[str],
@@ -368,12 +391,25 @@ class RelayPushProvider(PushProvider):
         Implements auto-retry with progressively reduced payloads when
         payload size errors occur (FCM 4KB limit).
         """
+        return await self._send_to_many(device_tokens, payload)
+
+    async def _send_to_many(
+        self,
+        device_tokens: list[str],
+        payload: NotificationPayload,
+        repair_registrations: list[dict[str, Any]] | None = None,
+    ) -> list[SendResult]:
+        """Send encrypted notification to devices via relay."""
         last_error: str | None = None
 
         # Try with progressively reduced payloads on size errors
         for reduction_level in range(_MAX_REDUCTION_LEVELS + 1):
             current_payload = self._reduce_payload(payload, reduction_level)
-            results = await self._try_send(device_tokens, current_payload)
+            results = await self._try_send(
+                device_tokens,
+                current_payload,
+                repair_registrations=repair_registrations,
+            )
 
             # Check if all failures are due to payload size
             all_size_errors = all(
@@ -410,10 +446,33 @@ class RelayPushProvider(PushProvider):
             for t in device_tokens
         ]
 
+    def _build_repair_registration(
+        self,
+        device: dict[str, Any],
+        device_token: str,
+    ) -> dict[str, Any] | None:
+        """Build relay-side repair metadata from the locally paired device."""
+        fcm_token = str(device.get("fcm_token") or "").strip()
+        if not fcm_token:
+            return None
+
+        repair: dict[str, Any] = {
+            "deviceId": device_token,
+            "fcmToken": fcm_token,
+            "platform": str(device.get("platform") or "unknown").lower(),
+        }
+        app_version = device.get("app_version")
+        if app_version:
+            repair["appVersion"] = str(app_version)
+        if device.get("subscription_active") is not None:
+            repair["subscriptionActive"] = bool(device.get("subscription_active"))
+        return repair
+
     async def _try_send(
         self,
         device_tokens: list[str],
         payload: NotificationPayload,
+        repair_registrations: list[dict[str, Any]] | None = None,
     ) -> list[SendResult]:
         """Attempt to send a notification payload to devices.
 
@@ -445,6 +504,8 @@ class RelayPushProvider(PushProvider):
             body["collapseId"] = payload.notification_tag
         if payload.live_activity:
             body["liveActivity"] = payload.live_activity
+        if repair_registrations:
+            body["repairRegistrations"] = repair_registrations
 
         # Validate and catch size errors early
         try:

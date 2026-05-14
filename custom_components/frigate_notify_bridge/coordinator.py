@@ -277,7 +277,14 @@ class FrigateNotifyCoordinator:
                 review_id,
                 payload.notification_tag or "none",
             )
-            result = await self.push_provider.async_send(token, payload)
+            if use_relay:
+                result = await self.push_provider.async_send_to_device(
+                    device,
+                    token,
+                    payload,
+                )
+            else:
+                result = await self.push_provider.async_send(token, payload)
             return device, result
 
         send_results = await asyncio.gather(
