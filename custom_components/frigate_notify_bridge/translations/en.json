@@ -175,7 +175,11 @@
     },
     "notification_delivery_failures": {
       "title": "Notification delivery failures detected",
-      "description": "Frigate Notify Bridge could not deliver notifications to {failed_count} device(s): {devices}\n\nLast error: {reason}\n\nThe bridge will keep trying future notifications, but you may need to re-pair affected devices or correct the push provider configuration."
+      "description": "Frigate Notify Bridge could not deliver notifications to {failed_count} device(s): {devices}\n\nLast error: {reason}\n\nDevice-specific failures are paused until the affected app refreshes its push token. Provider-wide failures require correcting the push provider configuration."
+    },
+    "device_notification_unreachable": {
+      "title": "Device notifications paused",
+      "description": "Frigate Notify Bridge paused notification delivery to {failed_count} device(s): {devices}\n\nLast error: {reason}\n\nOpen Frigate Mobile on the affected device so it can refresh and confirm its FCM token. The bridge will not send more notifications to that device until the token update is received."
     }
   }
 }

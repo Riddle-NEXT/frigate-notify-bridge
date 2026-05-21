@@ -27,7 +27,8 @@ from .const import (
 import json as _json
 
 from .cross_camera import CrossCameraCorrelator, CorrelationRecord, compose_snapshot_image
-from .issues import ISSUE_NOTIFICATION_DELIVERY
+from .device_manager import should_suspend_notification_delivery
+from .issues import ISSUE_DEVICE_NOTIFICATION_UNREACHABLE, ISSUE_NOTIFICATION_DELIVERY
 from .push_providers.base import NotificationPayload, SendResult
 from .smart_rules import smart_rule_runtime_match
 
@@ -298,6 +299,9 @@ class FrigateNotifyCoordinator:
             _LOGGER.debug("No device targets available for notification")
             return
 
+        suspended_failure_names: list[str] = []
+        suspended_failure_reason: str | None = None
+
         # Record delivery results and increment alert counts for successful sends
         for device, result in zip(notified_devices, results):
             await self.device_manager.async_record_delivery_result(
@@ -305,6 +309,9 @@ class FrigateNotifyCoordinator:
             )
             if result.success:
                 await self.device_manager.async_increment_alert_count(device["id"])
+            elif should_suspend_notification_delivery(result.error):
+                suspended_failure_names.append(device.get("name", result.device_id))
+                suspended_failure_reason = suspended_failure_reason or result.error
 
         # Log results
         success_count = sum(1 for r in results if r.success)
@@ -350,6 +357,24 @@ class FrigateNotifyCoordinator:
                     else None
                 ),
             )
+            if suspended_failure_names:
+                await self.issue_manager.async_report_device_notification_unreachable(
+                    failed_devices=suspended_failure_names,
+                    reason=suspended_failure_reason or first_error,
+                    send_alert=(
+                        (
+                            lambda issue_id, title, body, **kwargs: self._async_send_issue_alert(
+                                successful_devices,
+                                issue_id,
+                                title,
+                                body,
+                                **kwargs,
+                            )
+                        )
+                        if successful_devices
+                        else None
+                    ),
+                )
 
             # Handle failed tokens (e.g., remove invalid tokens)
             for result in results:
@@ -362,6 +387,13 @@ class FrigateNotifyCoordinator:
                         )
         else:
             await self.issue_manager.async_clear_issue(ISSUE_NOTIFICATION_DELIVERY)
+            suspended_devices = (
+                await self.device_manager.async_get_notification_suspended_devices()
+            )
+            if not suspended_devices:
+                await self.issue_manager.async_clear_issue(
+                    ISSUE_DEVICE_NOTIFICATION_UNREACHABLE
+                )
             _LOGGER.debug("All %d notifications sent successfully", success_count)
 
     def _remember_smart_rule_event(self, event_data: dict[str, Any]) -> None:

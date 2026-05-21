@@ -15,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 ISSUE_PUSH_PROVIDER_UNAVAILABLE = "push_provider_unavailable"
 ISSUE_NOTIFICATION_DELIVERY = "notification_delivery_failures"
+ISSUE_DEVICE_NOTIFICATION_UNREACHABLE = "device_notification_unreachable"
 _PUSH_ALERT_COOLDOWN = timedelta(hours=6)
 _ISSUE_ALERT_GRACE_PERIOD = timedelta(minutes=2)
 
@@ -176,6 +177,55 @@ class BridgeIssueManager:
             severity=ir.IssueSeverity.ERROR,
             title="Notification delivery failures",
             body=f"{len(failed_devices)} device(s) failed: {placeholder_devices or 'unknown'}. {reason}",
+            affected_devices=failed_devices,
+            error_detail=reason,
+            fingerprint=fingerprint,
+        )
+
+    async def async_report_device_notification_unreachable(
+        self,
+        failed_devices: list[str],
+        reason: str,
+        send_alert: IssueAlertCallback | None = None,
+    ) -> None:
+        """Create or update a persistent issue for suspended device delivery."""
+        placeholder_devices = ", ".join(failed_devices[:3])
+        if len(failed_devices) > 3:
+            placeholder_devices = f"{placeholder_devices}, +{len(failed_devices) - 3} more"
+        truncated_reason = reason[:200] if reason else "Unknown delivery error"
+        fingerprint = f"{','.join(sorted(failed_devices))}:{reason}"
+
+        await self.async_raise_issue(
+            issue_id=ISSUE_DEVICE_NOTIFICATION_UNREACHABLE,
+            translation_key=ISSUE_DEVICE_NOTIFICATION_UNREACHABLE,
+            translation_placeholders={
+                "failed_count": str(len(failed_devices)),
+                "devices": placeholder_devices or "unknown devices",
+                "reason": reason,
+            },
+            severity=ir.IssueSeverity.ERROR,
+            fingerprint=fingerprint,
+            send_alert=send_alert,
+            alert_title="Frigate Notify Bridge Needs Attention",
+            alert_body=(
+                f"Notifications paused for {placeholder_devices or 'unknown device'}: "
+                f"{truncated_reason}"
+            )[:200],
+            alert_issue_type=ISSUE_DEVICE_NOTIFICATION_UNREACHABLE,
+            alert_affected_devices=failed_devices,
+            alert_error_code="device_notification_unreachable",
+            alert_error_detail=truncated_reason,
+            alert_suggested_action="Open Frigate Mobile on the affected device to refresh its push token",
+        )
+        self._append_issue_history(
+            issue_id=ISSUE_DEVICE_NOTIFICATION_UNREACHABLE,
+            issue_type="device_notification_unreachable",
+            severity=ir.IssueSeverity.ERROR,
+            title="Device notification delivery paused",
+            body=(
+                f"Notifications are paused for {len(failed_devices)} device(s): "
+                f"{placeholder_devices or 'unknown'}. {reason}"
+            ),
             affected_devices=failed_devices,
             error_detail=reason,
             fingerprint=fingerprint,

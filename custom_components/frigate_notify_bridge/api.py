@@ -37,6 +37,7 @@ from .const import (
     CONF_RELAY_E2E_KEY,
     SIGNAL_DEVICE_UPDATED,
 )
+from .issues import ISSUE_DEVICE_NOTIFICATION_UNREACHABLE
 from .qr_generator import (
     generate_pairing_qr_data,
     generate_qr_code_base64,
@@ -191,7 +192,14 @@ async def async_setup_api(
     hass.http.register_view(PairDeviceView(entry, coordinator, device_manager))
     hass.http.register_view(DevicesView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceView(entry, coordinator, device_manager))
-    hass.http.register_view(DeviceTokenView(entry, coordinator, device_manager))
+    hass.http.register_view(
+        DeviceTokenView(
+            entry,
+            coordinator,
+            device_manager,
+            issue_manager=issue_manager,
+        )
+    )
     hass.http.register_view(DeviceMutesView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceMuteDetailView(entry, coordinator, device_manager))
     hass.http.register_view(DeviceMuteModeView(entry, coordinator, device_manager))
@@ -556,6 +564,17 @@ class DevicesView(BaseAPIView):
                 "last_failure_at": device.get("last_failure_at"),
                 "failure_count_today": device.get("failure_count_today", 0),
                 "last_error": device.get("last_error"),
+                "notification_delivery_suspended": device.get(
+                    "notification_delivery_suspended",
+                    False,
+                ),
+                "notification_suspended_at": device.get("notification_suspended_at"),
+                "notification_suspended_reason": device.get(
+                    "notification_suspended_reason"
+                ),
+                "notification_token_confirmed_at": device.get(
+                    "notification_token_confirmed_at"
+                ),
             })
 
         return web.json_response({
@@ -600,6 +619,16 @@ class DeviceView(BaseAPIView):
             "subscription_last_verified_at": device.get("subscription_last_verified_at"),
             "notification_settings": device.get("notification_settings", {}),
             "mutes": mutes,
+            "last_error": device.get("last_error"),
+            "notification_delivery_suspended": device.get(
+                "notification_delivery_suspended",
+                False,
+            ),
+            "notification_suspended_at": device.get("notification_suspended_at"),
+            "notification_suspended_reason": device.get("notification_suspended_reason"),
+            "notification_token_confirmed_at": device.get(
+                "notification_token_confirmed_at"
+            ),
         })
 
     async def patch(self, request: web.Request, device_id: str) -> web.Response:
@@ -668,6 +697,18 @@ class DeviceTokenView(BaseAPIView):
     url = f"{API_BASE_PATH}/devices/{{device_id}}/token"
     name = "api:frigate_notify_bridge:device_token"
 
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        coordinator: FrigateNotifyCoordinator,
+        device_manager: DeviceManager,
+        *,
+        issue_manager: BridgeIssueManager | None = None,
+    ) -> None:
+        """Initialize token update view."""
+        super().__init__(entry, coordinator, device_manager)
+        self._issue_manager = issue_manager
+
     async def post(self, request: web.Request, device_id: str) -> web.Response:
         """Update device's FCM token."""
         resolved_device_id = self._resolve_owned_device_id(request, device_id)
@@ -707,6 +748,13 @@ class DeviceTokenView(BaseAPIView):
                 {"error": "Device not found"},
                 status=404,
             )
+
+        if self._issue_manager is not None:
+            suspended = await self.device_manager.async_get_notification_suspended_devices()
+            if not suspended:
+                await self._issue_manager.async_clear_issue(
+                    ISSUE_DEVICE_NOTIFICATION_UNREACHABLE
+                )
 
         return web.json_response({"success": True})
 
@@ -1151,6 +1199,11 @@ class StatusView(BaseAPIView):
             base["devices_count"] = len(devices)
             base["device_failure_count"] = sum(
                 1 for d in devices.values() if d.get("last_error") is not None
+            )
+            base["notification_suspended_device_count"] = sum(
+                1
+                for d in devices.values()
+                if d.get("notification_delivery_suspended")
             )
         return web.json_response(base)
 

@@ -71,6 +71,36 @@ DEFAULT_NOTIFICATION_SETTINGS: dict[str, Any] = {
 ALLOWED_EVENT_KINDS = {"alert", "detection", "recording"}
 
 
+def should_suspend_notification_delivery(error: str | None) -> bool:
+    """Return whether a delivery error means this device should be quarantined."""
+    reason = (error or "").strip().lower()
+    if not reason:
+        return False
+
+    provider_wide_errors = (
+        "authentication failed",
+        "credential",
+        "provider",
+        "app check",
+        "permission denied",
+    )
+    if any(marker in reason for marker in provider_wide_errors):
+        return False
+
+    device_unreachable_errors = (
+        "not-registered",
+        "not registered",
+        "unregistered",
+        "invalid device token",
+        "device token is no longer valid",
+        "requested entity was not found",
+        "unknown device",
+        "registration token",
+        "unreachable",
+    )
+    return any(marker in reason for marker in device_unreachable_errors)
+
+
 class DeviceManager:
     """Manage paired mobile devices."""
 
@@ -94,6 +124,10 @@ class DeviceManager:
                 device.get("notification_settings")
             )
             device["mute_mode"] = normalize_mute_mode(device.get("mute_mode"))
+            device.setdefault("notification_delivery_suspended", False)
+            device.setdefault("notification_suspended_at", None)
+            device.setdefault("notification_suspended_reason", None)
+            device.setdefault("notification_token_confirmed_at", None)
 
     async def async_save(self) -> None:
         """Save devices to storage."""
@@ -505,6 +539,10 @@ class DeviceManager:
             "failure_count_today": 0,
             "failure_count_date": datetime.utcnow().strftime("%Y-%m-%d"),
             "last_error": None,
+            "notification_delivery_suspended": False,
+            "notification_suspended_at": None,
+            "notification_suspended_reason": None,
+            "notification_token_confirmed_at": None,
         }
 
         self._devices[device_id] = device
@@ -649,13 +687,29 @@ class DeviceManager:
 
         self._devices[device_id]["fcm_token"] = fcm_token
         self._devices[device_id]["last_seen"] = datetime.utcnow().isoformat()
+        self._devices[device_id]["last_error"] = None
+        self._devices[device_id]["notification_delivery_suspended"] = False
+        self._devices[device_id]["notification_suspended_at"] = None
+        self._devices[device_id]["notification_suspended_reason"] = None
+        self._devices[device_id]["notification_token_confirmed_at"] = (
+            datetime.utcnow().isoformat()
+        )
         await self.async_save()
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_UPDATED, device_id)
         _LOGGER.info(
             "FCM token updated for device %s (%s)",
             self._devices[device_id].get("name"),
             device_id,
         )
         return True
+
+    async def async_get_notification_suspended_devices(self) -> list[dict[str, Any]]:
+        """Return devices quarantined from notification delivery."""
+        return [
+            device
+            for device in self._devices.values()
+            if device.get("notification_delivery_suspended")
+        ]
 
     def validate_api_token(self, api_token: str) -> str | None:
         """Validate an API token and return the device ID if valid."""
@@ -956,6 +1010,13 @@ class DeviceManager:
             if device.get("subscription_active") is False:
                 continue
 
+            if device.get("notification_delivery_suspended"):
+                _LOGGER.debug(
+                    "Skipping device %s: notification delivery suspended until fresh token update",
+                    device.get("id"),
+                )
+                continue
+
             # Check if notifications are enabled
             if not settings.get("enabled", True):
                 continue
@@ -1220,5 +1281,10 @@ class DeviceManager:
             device["last_failure_at"] = now
             device["failure_count_today"] = device.get("failure_count_today", 0) + 1
             device["last_error"] = error
+            if should_suspend_notification_delivery(error):
+                device["notification_delivery_suspended"] = True
+                device["notification_suspended_at"] = now
+                device["notification_suspended_reason"] = error
 
         await self.async_save()
+        async_dispatcher_send(self.hass, SIGNAL_DEVICE_UPDATED, device_id)
